@@ -55,7 +55,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/select.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -874,6 +876,35 @@ static const char *vaapi_device_arg(void)
     return buf[0] ? buf : NULL;
 }
 
+/* x264 参数：默认 veryfast/crf19；MIKU_PRESET / MIKU_CRF 可覆盖。
+ * 想快就 MIKU_PRESET=ultrafast：编码约快 2.2 倍、同画质体积大 1.6 倍
+ * （ultrafast 关了 CABAC）。返回的字符串用完要 free */
+static char *x264_args(void)
+{
+    const char *preset = getenv("MIKU_PRESET");
+    const char *crf = getenv("MIKU_CRF");
+    if (!preset || !*preset) {
+        preset = X264_PRESET;
+    }
+    if (!crf || !*crf) {
+        crf = X264_CRF;
+    }
+    return xasprintf("-preset %s -crf %s -x264-params colorprim=bt709:transfer=bt709:colormatrix=bt709",
+                     preset, crf);
+}
+
+/* 该编码器实际要用的参数；x264 走环境变量，其余用表里的固定值或码率 */
+static char *encoder_args(const EncoderCand *c, int w, int h, int fps)
+{
+    if (strcmp(c->codec, "libx264") == 0) {
+        return x264_args();
+    }
+    if (c->fixed) {
+        return xasprintf("%s", c->fixed);
+    }
+    return xasprintf("-b:v %ldk", hw_bitrate_kbps(w, h, fps));
+}
+
 /* 候选编码器需要的 -i 前参数；返回 NULL 表示本机缺条件（如没有 renderD*） */
 static const char *cand_input_prefix(const EncoderCand *c)
 {
@@ -935,8 +966,7 @@ static int encoder_works(const EncoderCand *c, int w, int h, int fps)
     if (c->vaapi && !prefix) {
         return 0; /* 本机没有 renderD* 设备，vaapi 无从谈起 */
     }
-    char *args = c->fixed ? xasprintf("%s", c->fixed)
-                          : xasprintf("-b:v %ldk", hw_bitrate_kbps(w, h, fps));
+    char *args = encoder_args(c, w, h, fps);
     if (!args) {
         return 0;
     }
@@ -1476,10 +1506,15 @@ static void render_frame(const GlyphAtlas *atlas, const uint8_t *cells, int cols
                 uint8_t *d = out + ((size_t)y * ch + j) * row_stride + (size_t)x * cw * 3;
                 const uint8_t *m = mask + (size_t)j * cw;
                 for (int i = 0; i < cw; ++i) {
-                    const int a = m[i];
-                    d[0] = (uint8_t)((cr * a) / 255);
-                    d[1] = (uint8_t)((cg * a) / 255);
-                    d[2] = (uint8_t)((cb * a) / 255);
+                    /* 混合用 (x*a+128+((x*a+128)>>8))>>8 代替 /255：
+                     * 结果是四舍五入的 x*a/255，但对 8 位输入是精确的 */
+                    const unsigned a = m[i];
+                    const unsigned tr = (unsigned)cr * a + 128;
+                    const unsigned tg = (unsigned)cg * a + 128;
+                    const unsigned tb = (unsigned)cb * a + 128;
+                    d[0] = (uint8_t)((tr + (tr >> 8)) >> 8);
+                    d[1] = (uint8_t)((tg + (tg >> 8)) >> 8);
+                    d[2] = (uint8_t)((tb + (tb >> 8)) >> 8);
                     d += 3;
                 }
             }
@@ -1579,9 +1614,8 @@ static int convert(const char *input, const char *output, int req_cols, const Pr
     printf("使用字符集: %d 个字符（由暗到亮）\n[%s]\n", FONT_CHAR_COUNT, atlas.chars);
 
     /* 步骤5：启动解码和编码两个 ffmpeg 进程
-     * 编码器已经在 choose_profile 里真跑过 3 帧，这里直接用选中的那个 */
-    char *enc_args = p->enc->fixed ? xasprintf("%s", p->enc->fixed)
-                                   : xasprintf("-b:v %ldk", hw_bitrate_kbps(p->width, p->height, p->fps));
+     * 编码器已经在 choose_profile 里真跑过 8 帧，这里直接用选中的那个 */
+    char *enc_args = encoder_args(p->enc, p->width, p->height, p->fps);
     if (!enc_args) {
         goto cleanup;
     }
@@ -1732,12 +1766,263 @@ static int terminal_columns(void)
     return (int)ws.ws_col;
 }
 
+/* ---------------------------- 终端播放 ---------------------------- */
+
+/*
+ * 播放不走视频编码：直接把解码出来的网格按「字符 + 颜色」打进终端。
+ * 复用和转码完全相同的字符选择与取色，所以看到的就是成片的样子。
+ */
+
+static struct termios g_saved_term;
+static int g_term_raw = 0;
+static volatile sig_atomic_t g_play_stop = 0;
+
+static void play_restore_term(void)
+{
+    if (g_term_raw) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_saved_term);
+        g_term_raw = 0;
+    }
+    fputs("\x1b[0m\x1b[?25h", stdout); /* 复位颜色、恢复光标 */
+    fflush(stdout);
+}
+
+static void play_on_signal(int sig)
+{
+    (void)sig;
+    g_play_stop = 1;
+}
+
+static void play_raw_mode(void)
+{
+    if (!isatty(STDIN_FILENO) || tcgetattr(STDIN_FILENO, &g_saved_term) != 0) {
+        return;
+    }
+    struct termios t = g_saved_term;
+    t.c_lflag &= ~(tcflag_t)(ICANON | ECHO);
+    t.c_cc[VMIN] = 0;
+    t.c_cc[VTIME] = 0;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &t) == 0) {
+        g_term_raw = 1;
+    }
+}
+
+/* 读一个键，没有就返回 0（非阻塞） */
+static int play_poll_key(void)
+{
+    if (!g_term_raw) {
+        return 0;
+    }
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(STDIN_FILENO, &fds);
+    struct timeval tv = {0, 0};
+    if (select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) <= 0) {
+        return 0;
+    }
+    unsigned char c = 0;
+    return read(STDIN_FILENO, &c, 1) == 1 ? (int)c : 0;
+}
+
+static void sleep_until(double deadline)
+{
+    for (;;) {
+        const double left = deadline - now_seconds();
+        if (left <= 0.0) {
+            return;
+        }
+        struct timespec ts;
+        ts.tv_sec = (time_t)left;
+        ts.tv_nsec = (long)((left - (double)ts.tv_sec) * 1e9);
+        nanosleep(&ts, NULL);
+    }
+}
+
+/* 终端行数；拿不到返回 0 */
+static int terminal_rows(void)
+{
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0 || ws.ws_row == 0) {
+        if (ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) != 0 || ws.ws_row == 0) {
+            return 0;
+        }
+    }
+    return (int)ws.ws_row;
+}
+
+/* 按字节数扩容的缓冲区 */
+typedef struct {
+    char *buf;
+    size_t len;
+    size_t cap;
+} StrBuf;
+
+static int sb_reserve(StrBuf *sb, size_t extra)
+{
+    if (sb->len + extra <= sb->cap) {
+        return 1;
+    }
+    size_t cap = sb->cap ? sb->cap : 4096;
+    while (cap < sb->len + extra) {
+        cap *= 2;
+    }
+    char *p = realloc(sb->buf, cap);
+    if (!p) {
+        return 0;
+    }
+    sb->buf = p;
+    sb->cap = cap;
+    return 1;
+}
+
+static int sb_addf(StrBuf *sb, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    char tmp[64];
+    const int n = vsnprintf(tmp, sizeof tmp, fmt, ap);
+    va_end(ap);
+    if (n <= 0 || !sb_reserve(sb, (size_t)n + 1)) {
+        return 0;
+    }
+    memcpy(sb->buf + sb->len, tmp, (size_t)n);
+    sb->len += (size_t)n;
+    return 1;
+}
+
+static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, int play_fps)
+{
+    GlyphAtlas atlas;
+    memset(&atlas, 0, sizeof atlas);
+    FILE *dec = NULL;
+    char *qin = NULL, *cmd = NULL;
+    uint8_t *cells = NULL;
+    StrBuf sb = {NULL, 0, 0};
+    int ret = 0;
+
+    build_gamma_lut();
+    /* 只借用图集里的字符顺序与亮度查找表，字符位图本身用不上 */
+    if (!atlas_build(&atlas, 8, 16)) {
+        fprintf(stderr, "字形图集生成失败\n");
+        return 0;
+    }
+
+    /* 网格：列宽按参数，行数按视频宽高比；终端放不下就缩列数 */
+    int cols = req_cols;
+    const int aspect_rows = (int)lround((double)cols * vp->height / vp->width * 0.5);
+    int rows = aspect_rows < 1 ? 1 : aspect_rows;
+    const int trows = terminal_rows();
+    if (trows > 1 && rows > trows - 1) { /* 留一行给提示 */
+        rows = trows - 1;
+        cols = (int)lround((double)rows * vp->width / vp->height * 2.0);
+        cols = cols < 8 ? 8 : cols;
+    }
+
+    const size_t cell_bytes = (size_t)cols * rows * 3;
+    cells = malloc(cell_bytes);
+    if (!cells) {
+        goto cleanup;
+    }
+
+    qin = shell_quote(input);
+    if (!qin) {
+        goto cleanup;
+    }
+    cmd = xasprintf("ffmpeg -nostdin -v error -i %s -an -sn -vf 'fps=%d,scale=%d:%d:flags=area' "
+                    "-f rawvideo -pix_fmt rgb24 pipe:1 2>/dev/null",
+                    qin, play_fps, cols, rows);
+    if (!cmd) {
+        goto cleanup;
+    }
+    dec = popen(cmd, "r");
+    if (!dec) {
+        fprintf(stderr, "无法启动 ffmpeg 解码\n");
+        goto cleanup;
+    }
+
+    signal(SIGINT, play_on_signal);
+    signal(SIGTERM, play_on_signal);
+    play_raw_mode();
+    atexit(play_restore_term);
+    fputs("\x1b[?25l\x1b[2J", stdout); /* 藏光标、清屏 */
+
+    const double start = now_seconds();
+    int64_t frame = 0;
+    int quit = 0;
+
+    while (!g_play_stop && fread(cells, 1, cell_bytes, dec) == cell_bytes) {
+        sb.len = 0;
+        if (!sb_addf(&sb, "\x1b[H")) {
+            break;
+        }
+        int last_r = -1, last_g = -1, last_b = -1;
+        for (int y = 0; y < rows; ++y) {
+            for (int x = 0; x < cols; ++x) {
+                const uint8_t *px = cells + ((size_t)y * cols + x) * 3;
+                const int r = px[0], g = px[1], b = px[2];
+                const double lum = RED_WEIGHT * r + GREEN_WEIGHT * g + BLUE_WEIGHT * b;
+                int level = (int)(lum + 0.5);
+                level = level < 0 ? 0 : (level > 255 ? 255 : level);
+                int cr, cg, cb;
+                make_cell_color(r, g, b, &cr, &cg, &cb);
+                if (cr != last_r || cg != last_g || cb != last_b) { /* 颜色变了才发 SGR */
+                    if (!sb_addf(&sb, "\x1b[38;2;%d;%d;%dm", cr, cg, cb)) {
+                        quit = 1;
+                        break;
+                    }
+                    last_r = cr;
+                    last_g = cg;
+                    last_b = cb;
+                }
+                if (!sb_reserve(&sb, 2)) {
+                    quit = 1;
+                    break;
+                }
+                sb.buf[sb.len++] = atlas.chars[atlas.lut[gamma_lut[level]]];
+            }
+            if (quit || !sb_addf(&sb, "\x1b[0m\r\n")) {
+                quit = 1;
+                break;
+            }
+            last_r = last_g = last_b = -1; /* 行末复位颜色 */
+        }
+        if (quit) {
+            break;
+        }
+        fwrite(sb.buf, 1, sb.len, stdout);
+        fflush(stdout);
+
+        ++frame;
+        if (play_poll_key() == 'q') {
+            break;
+        }
+        if (g_play_stop) {
+            break;
+        }
+        sleep_until(start + (double)frame / play_fps);
+    }
+
+    fputs("\x1b[0m\r\n", stdout);
+    ret = 1;
+
+cleanup:
+    if (dec) {
+        pclose(dec);
+    }
+    free(atlas.masks);
+    free(cells);
+    free(cmd);
+    free(qin);
+    free(sb.buf);
+    return ret;
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 3) {
-        printf("用法: %s <input-video> <output-video> [ASCII宽度|auto] [质量|auto]\n", argv[0]);
+        printf("用法: %s [--play] <input-video> <output-video> [ASCII宽度|auto] [质量|auto]\n", argv[0]);
         printf("示例: %s miku.mp4 ascii.mp4\n", argv[0]);
-        printf("示例: %s miku.mp4 ascii.mp4 426 high\n", argv[0]);
+        printf("示例: %s --play miku.mp4 ascii.mp4 160 high\n", argv[0]);
         printf("示例: %s miku.mp4 ascii.mp4 auto 1920x1080@30\n", argv[0]);
         printf("ASCII宽度: %d-%d，越大字符越多越细，但单个字符越小\n",
                MIN_ASCII_WIDTH, MAX_ASCII_WIDTH);
@@ -1750,22 +2035,39 @@ int main(int argc, char *argv[])
         }
         printf("          也可以直接给尺寸：1920x1080 或 1920x1080@30\n");
         printf("输出帧率不会超过源帧率；64 位 ARM 手机上优先用硬件编码器\n");
+        printf("--play: 转码完成后直接在终端里按 ASCII 播放（q 退出）\n");
         return 1;
     }
 
-    const char *input = argv[1];
-    const char *output = argv[2];
+    /* 把 --play 从参数里摘出来，其余按位置解析 */
+    int want_play = 0;
+    const char *pos[4] = {NULL, NULL, NULL, NULL};
+    int npos = 0;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--play") == 0) {
+            want_play = 1;
+        } else if (npos < 4) {
+            pos[npos++] = argv[i];
+        }
+    }
+    if (npos < 2) {
+        fprintf(stderr, "错误: 至少要给输入与输出文件名（用法加 -h 前先跑一次不带参数看提示）\n");
+        return 1;
+    }
+
+    const char *input = pos[0];
+    const char *output = pos[1];
     int cols = DEFAULT_ASCII_WIDTH;
     int term_cols = 0;  /* 非 0 表示这次宽度来自终端，稍后打印适配结果 */
     char *end = NULL;
-    int auto_width = (argc < 4);  /* 没给宽度就自动适配终端 */
+    int auto_width = (npos < 3);  /* 没给宽度就自动适配终端 */
 
-    if (argc >= 4) {
-        if (strcmp(argv[3], "auto") == 0) {
+    if (npos >= 3) {
+        if (strcmp(pos[2], "auto") == 0) {
             auto_width = 1;
         } else {
-            cols = (int)strtol(argv[3], &end, 10);
-            if (end == argv[3] || *end != '\0') {
+            cols = (int)strtol(pos[2], &end, 10);
+            if (end == pos[2] || *end != '\0') {
                 fprintf(stderr, "错误: ASCII宽度必须是整数或 auto\n");
                 return 1;
             }
@@ -1786,10 +2088,10 @@ int main(int argc, char *argv[])
 
     /* 第4个参数：质量档位。旧版这里是已取消的缩放系数，给纯数字时仍按旧提示忽略 */
     const char *quality = "auto";
-    if (argc >= 5) {
+    if (npos >= 4) {
         int w = 0, h = 0, f = 0;
         int numeric = 1;
-        for (const char *c = argv[4]; *c; ++c) {
+        for (const char *c = pos[3]; *c; ++c) {
             if (*c < '0' || *c > '9') {
                 numeric = 0;
                 break;
@@ -1797,10 +2099,10 @@ int main(int argc, char *argv[])
         }
         if (numeric) {
             fprintf(stderr, "提示: 第4个参数（缩放系数）已取消，字符大小由ASCII宽度自动决定，已忽略\n");
-        } else if (parse_custom_size(argv[4], &w, &h, &f) || strcmp(argv[4], "auto") == 0 ||
-                   strcmp(argv[4], "high") == 0 || strcmp(argv[4], "mid") == 0 ||
-                   strcmp(argv[4], "low") == 0) {
-            quality = argv[4];
+        } else if (parse_custom_size(pos[3], &w, &h, &f) || strcmp(pos[3], "auto") == 0 ||
+                   strcmp(pos[3], "high") == 0 || strcmp(pos[3], "mid") == 0 ||
+                   strcmp(pos[3], "low") == 0) {
+            quality = pos[3];
         } else {
             fprintf(stderr, "错误: 质量参数无效，可用 auto / high / mid / low / 1920x1080[@30]\n");
             return 1;
@@ -1887,6 +2189,15 @@ int main(int argc, char *argv[])
         printf("成功创建彩色ASCII视频!\n");
         printf("输出文件: %s\n", output);
         printf("========================================\n");
+
+        if (want_play) {
+            /* 播放不需要编码，直接按终端网格重走一遍源；帧率封到 24，终端刷不过来 */
+            int play_fps = (int)lround(src_fps);
+            play_fps = play_fps < 1 ? 1 : (play_fps > 24 ? 24 : play_fps);
+            printf("在终端播放（按 q 退出）...\n");
+            fflush(stdout);
+            play_terminal(input, cols, &info, play_fps);
+        }
         return 0;
     }
 
