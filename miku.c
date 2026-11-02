@@ -46,6 +46,7 @@
 #define _POSIX_C_SOURCE 200809L  /* 需要 popen / clock_gettime，严格 C17 模式下要显式开启 */
 #define _DEFAULT_SOURCE 1        /* 需要 struct winsize（终端尺寸），glibc 在纯 POSIX 模式下不暴露 */
 
+#include <dirent.h>
 #include <math.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -132,7 +133,8 @@ static const Tier TIERS[TIER_COUNT] = {
 /* 编码器候选，按顺序试，第一个"真跑通"的用：
  *   fixed       软件编码器的固定参数；NULL 表示走码率（硬件编码器）
  *   pipe_filter 追加在 scale/format 之后的滤镜（VAAPI 需要 hwupload）
- *   input_prefix 放在 -i 之前的参数（VAAPI 设备）
+ *   input_prefix 放在 -i 之前的参数（非 VAAPI 的一般不用）
+ *   vaapi       设备路径不固定，运行时扫 /dev/dri/renderD* 再拼参数
  * 顺序刻意把各平台的硬件编码器排在前面，软件 x264 兜底，mpeg4 最后 */
 typedef struct {
     const char *codec;
@@ -140,18 +142,21 @@ typedef struct {
     const char *pipe_filter;
     const char *input_prefix;
     int hardware;
+    int vaapi;
 } EncoderCand;
 
 static const EncoderCand ENCODERS[] = {
-    {"h264_videotoolbox", NULL, NULL, NULL, 1},                                    /* macOS */
-    {"h264_nvenc", NULL, NULL, NULL, 1},                                           /* NVIDIA */
-    {"h264_qsv", NULL, NULL, NULL, 1},                                             /* Intel */
-    {"h264_vaapi", NULL, ",format=nv12,hwupload", "-vaapi_device /dev/dri/renderD128", 1}, /* AMD/Intel */
-    {"h264_mediacodec", NULL, NULL, NULL, 1},                                      /* Android */
+    {"h264_videotoolbox", NULL, NULL, NULL, 1, 0}, /* macOS */
+    {"h264_nvenc", NULL, NULL, NULL, 1, 0},        /* NVIDIA（Windows/Linux） */
+    {"h264_qsv", NULL, NULL, NULL, 1, 0},          /* Intel（Windows/Linux） */
+    {"h264_amf", NULL, NULL, NULL, 1, 0},          /* AMD（Windows） */
+    {"h264_mf", NULL, NULL, NULL, 1, 0},           /* Windows MediaFoundation */
+    {"h264_vaapi", NULL, ",format=nv12,hwupload", NULL, 1, 1}, /* AMD/Intel（Linux） */
+    {"h264_mediacodec", NULL, NULL, NULL, 1, 0},   /* Android */
     {"libx264", "-preset " X264_PRESET " -crf " X264_CRF
                 " -x264-params colorprim=bt709:transfer=bt709:colormatrix=bt709",
-     NULL, NULL, 0},
-    {"mpeg4", "-q:v 2", NULL, NULL, 0},
+     NULL, NULL, 0, 0},
+    {"mpeg4", "-q:v 2", NULL, NULL, 0, 0},
 };
 
 #define ENCODER_COUNT ((int)(sizeof(ENCODERS) / sizeof(ENCODERS[0])))
@@ -846,9 +851,38 @@ static long hw_bitrate_kbps(int w, int h, int fps)
     return kbps;
 }
 
+/* VAAPI 的设备节点不固定（renderD128/129/…），运行时扫一遍；找不到就没有 vaapi */
+static const char *vaapi_device_arg(void)
+{
+    static char buf[128];
+    static int scanned = 0;
+
+    if (!scanned) {
+        scanned = 1;
+        DIR *d = opendir("/dev/dri");
+        if (d) {
+            const struct dirent *e;
+            while ((e = readdir(d))) {
+                if (strncmp(e->d_name, "renderD", 7) == 0) {
+                    snprintf(buf, sizeof buf, "-vaapi_device /dev/dri/%s", e->d_name);
+                    break;
+                }
+            }
+            closedir(d);
+        }
+    }
+    return buf[0] ? buf : NULL;
+}
+
+/* 候选编码器需要的 -i 前参数；返回 NULL 表示本机缺条件（如没有 renderD*） */
+static const char *cand_input_prefix(const EncoderCand *c)
+{
+    return c->vaapi ? vaapi_device_arg() : c->input_prefix;
+}
+
 /*
- * 真编 24 帧来判断编码器在这个尺寸上是否可用，用的是和正式转换相同的滤镜链，
- * 写完再把帧数数回来。
+ * 真编 PROBE_FRAMES 帧来判断编码器在这个尺寸上是否可用，用的是和正式转换
+ * 相同的滤镜链，写完再把帧数数回来。
  *   - 只看 -encoders 列表不够：h264_vulkan 会列出来但滤镜协商就失败；
  *   - 只看退出码也不够：某些设备/版本的 mediacodec 会正常退出，却把帧编码成
  *     解不出来的包（实测这一版 ffmpeg 上 96 个包只能解出 73 帧），
@@ -897,6 +931,10 @@ static int count_decodable_frames(const char *path)
 
 static int encoder_works(const EncoderCand *c, int w, int h, int fps)
 {
+    const char *prefix = cand_input_prefix(c);
+    if (c->vaapi && !prefix) {
+        return 0; /* 本机没有 renderD* 设备，vaapi 无从谈起 */
+    }
     char *args = c->fixed ? xasprintf("%s", c->fixed)
                           : xasprintf("-b:v %ldk", hw_bitrate_kbps(w, h, fps));
     if (!args) {
@@ -911,7 +949,7 @@ static int encoder_works(const EncoderCand *c, int w, int h, int fps)
     char *cmd = xasprintf("ffmpeg -v error -y %s -f lavfi -i 'color=c=black:s=%dx%d:r=%d' "
                           "-frames:v %d -vf 'scale=out_color_matrix=bt709:out_range=tv,format=yuv420p%s' "
                           "-c:v %s %s %s 2>/dev/null",
-                          c->input_prefix ? c->input_prefix : "", w, h, fps, PROBE_FRAMES,
+                          prefix ? prefix : "", w, h, fps, PROBE_FRAMES,
                           c->pipe_filter ? c->pipe_filter : "", c->codec, args, out);
     free(args);
     int ok = 0;
@@ -1561,13 +1599,15 @@ static int convert(const char *input, const char *output, int req_cols, const Pr
                         "-vf 'fps=%ld/%ld,scale=%d:%d:flags=area' -f rawvideo -pix_fmt rgb24 pipe:1",
                         qin, info.fps_num, info.fps_den, L.cols, L.rows);
     /* 编码：从管道读取画布的 RGB 帧，转成 BT.709 的 yuv420p 并打上色彩标签，
-     * 同时从原视频取第一条音轨（没有音轨则忽略） */
-    enc_cmd = xasprintf("ffmpeg -y -v error -f rawvideo -pix_fmt rgb24 -s %dx%d -framerate %d -i pipe:0 "
+     * 同时从原视频取第一条音轨（没有音轨则忽略）。
+     * 硬件编码器需要的 -i 前参数（如 vaapi 设备）必须和探测时完全一致 */
+    const char *enc_prefix = cand_input_prefix(p->enc);
+    enc_cmd = xasprintf("ffmpeg -y -v error %s -f rawvideo -pix_fmt rgb24 -s %dx%d -framerate %d -i pipe:0 "
                         "-i %s -map 0:v:0 -map '1:a:0?' "
                         "-vf 'scale=out_color_matrix=bt709:out_range=tv,format=yuv420p%s' -r %d -c:v %s %s "
                         "-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv "
                         "-c:a aac -b:a 192k -movflags +faststart -shortest %s",
-                        p->width, p->height, p->fps, qin,
+                        enc_prefix ? enc_prefix : "", p->width, p->height, p->fps, qin,
                         p->enc->pipe_filter ? p->enc->pipe_filter : "", p->fps,
                         p->enc->codec, enc_args, qout);
     free(enc_args);
