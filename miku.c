@@ -44,6 +44,7 @@
 
 
 #define _POSIX_C_SOURCE 200809L  /* 需要 popen / clock_gettime，严格 C17 模式下要显式开启 */
+#define _DEFAULT_SOURCE 1        /* 需要 struct winsize（终端尺寸），glibc 在纯 POSIX 模式下不暴露 */
 
 #include <math.h>
 #include <signal.h>
@@ -52,8 +53,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 /* ---------------------------- 常量 ---------------------------- */
 
@@ -1225,28 +1228,61 @@ cleanup:
 
 /* ---------------------------- 入口 ---------------------------- */
 
+/* 当前终端列数：先问标准输出，再问标准输入；都不通（重定向 / 非终端）返回 0 */
+static int terminal_columns(void)
+{
+    struct winsize ws;
+
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0 || ws.ws_col == 0) {
+        if (ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) != 0 || ws.ws_col == 0) {
+            return 0;
+        }
+    }
+    return (int)ws.ws_col;
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 3) {
-        printf("用法: %s <input-video> <output-video> [ASCII宽度]\n", argv[0]);
+        printf("用法: %s <input-video> <output-video> [ASCII宽度|auto]\n", argv[0]);
         printf("示例: %s miku.mp4 ascii.mp4\n", argv[0]);
         printf("示例: %s miku.mp4 ascii.mp4 426\n", argv[0]);
         printf("输出固定为 %dx%d @ %dfps\n", OUT_WIDTH, OUT_HEIGHT, OUT_FPS);
-        printf("ASCII宽度: %d-%d，默认 %d（越大字符越多越细，但单个字符越小）\n",
-               MIN_ASCII_WIDTH, MAX_ASCII_WIDTH, DEFAULT_ASCII_WIDTH);
+        printf("ASCII宽度: %d-%d，越大字符越多越细，但单个字符越小\n",
+               MIN_ASCII_WIDTH, MAX_ASCII_WIDTH);
+        printf("          省略或写 auto 时跟随终端列数（不在终端里运行则用 %d）\n",
+               DEFAULT_ASCII_WIDTH);
         return 1;
     }
 
     const char *input = argv[1];
     const char *output = argv[2];
     int cols = DEFAULT_ASCII_WIDTH;
+    int term_cols = 0;  /* 非 0 表示这次宽度来自终端，稍后打印适配结果 */
     char *end = NULL;
+    int auto_width = (argc < 4);  /* 没给宽度就自动适配终端 */
 
     if (argc >= 4) {
-        cols = (int)strtol(argv[3], &end, 10);
-        if (end == argv[3] || *end != '\0') {
-            fprintf(stderr, "错误: ASCII宽度必须是整数\n");
-            return 1;
+        if (strcmp(argv[3], "auto") == 0) {
+            auto_width = 1;
+        } else {
+            cols = (int)strtol(argv[3], &end, 10);
+            if (end == argv[3] || *end != '\0') {
+                fprintf(stderr, "错误: ASCII宽度必须是整数或 auto\n");
+                return 1;
+            }
+        }
+    }
+    if (auto_width) {
+        term_cols = terminal_columns();
+        if (term_cols > 0) {
+            if (term_cols < MIN_ASCII_WIDTH) {
+                cols = MIN_ASCII_WIDTH;
+            } else if (term_cols > MAX_ASCII_WIDTH) {
+                cols = MAX_ASCII_WIDTH;
+            } else {
+                cols = term_cols;
+            }
         }
     }
     if (argc >= 5) {
@@ -1268,6 +1304,15 @@ int main(int argc, char *argv[])
     printf("========================================\n");
     printf("原彩ASCII视频转换器 v4.1 (C17)\n");
     printf("========================================\n");
+
+    if (term_cols > 0) {
+        if (term_cols == cols) {
+            printf("宽度: 已按终端 %d 列自动适配\n", cols);
+        } else {
+            printf("宽度: 终端 %d 列，超出 %d-%d，按 %d 列输出\n",
+                   term_cols, MIN_ASCII_WIDTH, MAX_ASCII_WIDTH, cols);
+        }
+    }
 
     if (convert(input, output, cols)) {
         printf("========================================\n");
