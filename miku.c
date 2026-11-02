@@ -3017,9 +3017,189 @@ static void ui_join(char *dst, size_t cap, const char *dir, const char *name)
     }
 }
 
+
+/* ---------------- 外部选择器（有就用外部工具，没有才用内置列表） ---------------- */
+
+/* 读一行到 out；返回 1 成功 */
+static int ui_read_first_line(const char *path, char *out, size_t cap)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (!fgets(out, (int)cap, f)) {
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    const size_t n = strlen(out);
+    if (n > 0 && out[n - 1] == '\n') {
+        out[n - 1] = '\0';
+    }
+    return out[0] != '\0';
+}
+
+/* fzf：同样的目录模型，但列表交给它，自带模糊搜索与高亮。返回 1 选中 / -1 取消 / 0 不可用 */
+static int ui_pick_with_fzf(char *out, size_t cap, const char *start)
+{
+    char dir[1024];
+    snprintf(dir, sizeof dir, "%s", (start && *start) ? start : ".");
+    struct stat st;
+    if (stat(dir, &st) == 0 && !S_ISDIR(st.st_mode)) {
+        ui_parent_dir(dir);
+    }
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        snprintf(dir, sizeof dir, ".");
+    }
+
+    for (;;) {
+        DirEntry *list = NULL;
+        int count = 0;
+        if (!ui_load_dir(dir, &list, &count)) {
+            free(list);
+            return 0;
+        }
+        char *in = xasprintf("%s/miku-pick-%ld.in", temp_dir(), (long)getpid());
+        char *res = xasprintf("%s/miku-pick-%ld.out", temp_dir(), (long)getpid());
+        int ok = in && res;
+        if (ok) {
+            FILE *f = fopen(in, "w");
+            if (!f) {
+                ok = 0;
+            } else {
+                for (int i = 0; i < count; ++i) {
+                    fprintf(f, "%s%s\n", list[i].name, list[i].is_dir ? "/" : "");
+                }
+                fclose(f);
+            }
+        }
+        free(list);
+        if (!ok) {
+            free(in);
+            free(res);
+            return 0;
+        }
+
+        char *q_dir = shell_quote(dir);
+        char *q_in = shell_quote(in);
+        char *q_res = shell_quote(res);
+        char *cmd = NULL;
+        if (q_dir && q_in && q_res) {
+            cmd = xasprintf("fzf --height=100%% --reverse --cycle --prompt='%s > ' "
+                            "--header='Enter 进入/选定  Esc 取消（直接输入可搜索）' < %s > %s",
+                            q_dir, q_in, q_res);
+        }
+        free(q_dir);
+        free(q_in);
+        free(q_res);
+
+        int rc = -1;
+        if (cmd) {
+            ui_leave(); /* 把终端交给 fzf */
+            rc = system(cmd);
+            ui_enter();
+            free(cmd);
+        }
+
+        char chosen[512];
+        const int got = ui_read_first_line(res, chosen, sizeof chosen);
+        remove(in);
+        remove(res);
+        free(in);
+        free(res);
+
+        if (rc != 0 || !got) {
+            return -1; /* Esc 或 Ctrl-C */
+        }
+        const size_t n = strlen(chosen);
+        if (n > 0 && chosen[n - 1] == '/') { /* 目录：去掉斜杠继续往里 */
+            chosen[n - 1] = '\0';
+            char next[1024];
+            if (strcmp(chosen, "..") == 0) {
+                snprintf(next, sizeof next, "%s", dir);
+                ui_parent_dir(next);
+            } else {
+                ui_join(next, sizeof next, dir, chosen);
+            }
+            snprintf(dir, sizeof dir, "%s", next);
+            continue;
+        }
+        ui_join(out, cap, dir, chosen);
+        return 1;
+    }
+}
+
+/* dialog --fselect：界面上什么都看得到，但没有搜索。返回 1 选中 / -1 取消 / 0 不可用 */
+static int ui_pick_with_dialog(char *out, size_t cap, const char *start)
+{
+    char dir[1024];
+    snprintf(dir, sizeof dir, "%s", (start && *start) ? start : ".");
+    struct stat st;
+    if (stat(dir, &st) == 0 && !S_ISDIR(st.st_mode)) {
+        ui_parent_dir(dir);
+    }
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        snprintf(dir, sizeof dir, ".");
+    }
+
+    /* dialog 把 "名字" 直接接在基路径后面；基路径没有结尾斜杠时会拼成 ".miku.mp4" */
+    char dir_slash[1024];
+    snprintf(dir_slash, sizeof dir_slash, "%s%s", dir, dir[strlen(dir) - 1] == '/' ? "" : "/");
+    char *q = shell_quote(dir_slash);
+    if (!q) {
+        return 0;
+    }
+    char *cmd = xasprintf("dialog --stdout --title ' 选择视频 ' --fselect %s 0 0", q);
+    free(q);
+    if (!cmd) {
+        return 0;
+    }
+
+    ui_leave();
+    FILE *p = popen(cmd, "r");
+    free(cmd);
+    int rc = -1;
+    out[0] = '\0';
+    if (p) {
+        char line[1024];
+        if (fgets(line, sizeof line, p)) {
+            const size_t n = strlen(line);
+            if (n > 0 && line[n - 1] == '\n') {
+                line[n - 1] = '\0';
+            }
+            snprintf(out, cap, "%s", line);
+        }
+        rc = pclose(p);
+    }
+    ui_enter();
+    if (rc != 0 || !out[0]) {
+        return -1;
+    }
+    /* 统一成绝对路径：显示短、也不怕后面换目录 */
+    char abs[1024];
+    if (realpath(out, abs) != NULL) {
+        snprintf(out, cap, "%s", abs);
+    }
+    return 1;
+}
+
 /* 返回 1 = 选中（out 是路径），0 = 取消 */
 static int ui_pick_file(char *out, size_t cap, const char *start)
 {
+    if (command_exists("fzf")) {
+        const int r = ui_pick_with_fzf(out, cap, start);
+        if (r != 0) {
+            return r > 0;
+        }
+    }
+    if (command_exists("dialog")) {
+        const int r = ui_pick_with_dialog(out, cap, start);
+        if (r != 0) {
+            return r > 0;
+        }
+    }
+
     char dir[1024];
     snprintf(dir, sizeof dir, "%s", (start && *start) ? start : ".");
     struct stat st;
