@@ -57,6 +57,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -1183,7 +1184,6 @@ static int choose_profile(const char *quality, int src_fps, Profile *p)
 }
 
 /* ---------------------------- 字形图集 ---------------------------- */
-
 /*
  * 启动时把每个字符缩放成一张 cell_w x cell_h 的灰度蒙版（只做一次），
  * 并统计每个字符的"墨量"（字形覆盖格子的比例），按墨量从小到大排序。
@@ -1355,6 +1355,95 @@ typedef struct {
     long fps_den;
     long total_frames; /* 0 表示未知 */
 } VideoInfo;
+
+/* 画面比例：0 = 跟源一致 */
+#define RATIO_COUNT 6
+static const char *RATIO_NAMES[RATIO_COUNT] = {"原画", "16:9", "9:16", "1:1", "4:3", "21:9"};
+static const double RATIO_VALUES[RATIO_COUNT] = {0.0, 16.0 / 9.0, 9.0 / 16.0, 1.0, 4.0 / 3.0,
+                                                 21.0 / 9.0};
+
+/* 按比例算出画布宽高（都是偶数）；base_h 是基准高度 */
+static void ratio_dims(int ratio, int src_w, int src_h, int base_h, int *w, int *h)
+{
+    const double ar = ratio > 0 ? RATIO_VALUES[ratio] : (double)src_w / (double)src_h;
+    int ww = (int)lround(base_h * ar) & ~1;
+    int hh = base_h & ~1;
+    /* 只防「小到 yuv420p 装不下」，绝不上采样 —— 原画档要的就是源的原始尺寸 */
+    if (ww < 64) {
+        ww = 64;
+        hh = (int)lround((double)ww / ar) & ~1;
+    }
+    if (hh < 64) {
+        hh = 64;
+    }
+    if (ww > 7680) {
+        ww = 7680;
+    }
+    if (hh > 4320) {
+        hh = 4320;
+    }
+    *w = ww;
+    *h = hh;
+}
+
+/*
+ * 界面用的选档：在 choose_profile 之上叠「比例」与「帧率」。
+ * quality 可以是 auto / high / mid / low / src（原画分辨率）。
+ * 改了尺寸或帧率就重新探一次编码器，别拿旧探测结果去编。
+ */
+static int choose_profile_ex(const char *quality, int ratio, int fps_want, const VideoInfo *vi,
+                             Profile *p)
+{
+    const double src_fps = (double)vi->fps_num / vi->fps_den;
+    const int src_rounded = (int)lround(src_fps);
+
+    if (strcmp(quality, "src") == 0) {
+        int w = 0, h = 0;
+        ratio_dims(ratio, vi->width, vi->height, vi->height & ~1, &w, &h);
+        const int fps = (fps_want > 0 && fps_want < src_rounded)
+                            ? fps_want
+                            : (src_rounded > 0 ? src_rounded : 24);
+        const EncoderCand *enc = pick_encoder(w, h, fps);
+        if (!enc) {
+            return 0;
+        }
+        p->width = w;
+        p->height = h;
+        p->fps = fps;
+        p->enc = enc;
+        snprintf(p->name, sizeof p->name, "%s", "原画");
+        return 1;
+    }
+
+    if (!choose_profile(quality, src_rounded, p)) {
+        return 0;
+    }
+
+    if (ratio > 0) {
+        int w = 0, h = 0;
+        ratio_dims(ratio, vi->width, vi->height, p->height, &w, &h);
+        const EncoderCand *enc = pick_encoder(w, h, p->fps);
+        if (!enc) {
+            return 0;
+        }
+        p->width = w;
+        p->height = h;
+        p->enc = enc;
+    }
+
+    if (fps_want > 0) {
+        const int f = fps_want < src_rounded ? fps_want : src_rounded;
+        if (f >= 1 && f != p->fps) {
+            const EncoderCand *enc = pick_encoder(p->width, p->height, f);
+            if (!enc) {
+                return 0;
+            }
+            p->fps = f;
+            p->enc = enc;
+        }
+    }
+    return 1;
+}
 
 /* 解析 "30000/1001" 或 "24" 这样的帧率 */
 static int parse_rate(const char *s, long *num, long *den)
@@ -1540,6 +1629,42 @@ static void render_frame(const GlyphAtlas *atlas, const uint8_t *cells, int cols
 
 /* ---------------------------- 转换主流程 ---------------------------- */
 
+/*
+ * 色块风格：每格取上下两个采样点，上半格填上方的颜色、下半格填下方的颜色。
+ * 终端里对应一个 ▀（前色是上半、后色是下半），所以纵向细节是字符风格的两倍。
+ */
+static void render_block_cells(const uint8_t *cells, int cols, int rows, uint8_t *out,
+                               size_t row_stride, int cell_w, int cell_h)
+{
+    const int half = cell_h / 2;
+    for (int y = 0; y < rows; ++y) {
+        for (int x = 0; x < cols; ++x) {
+            const uint8_t *pt = cells + ((size_t)(y * 2) * cols + x) * 3;
+            const uint8_t *pb = cells + ((size_t)(y * 2 + 1) * cols + x) * 3;
+            int tr, tg, tb, br, bg, bb;
+            make_cell_color(pt[0], pt[1], pt[2], &tr, &tg, &tb);
+            make_cell_color(pb[0], pb[1], pb[2], &br, &bg, &bb);
+            uint8_t *d = out + (size_t)(y * cell_h) * row_stride + (size_t)x * cell_w * 3;
+            for (int j = 0; j < cell_h; ++j) {
+                const int top = j < half;
+                const uint8_t r = (uint8_t)(top ? tr : br);
+                const uint8_t g = (uint8_t)(top ? tg : bg);
+                const uint8_t b = (uint8_t)(top ? tb : bb);
+                for (int i = 0; i < cell_w; ++i) {
+                    d[i * 3 + 0] = r;
+                    d[i * 3 + 1] = g;
+                    d[i * 3 + 2] = b;
+                }
+                d += row_stride;
+            }
+        }
+    }
+}
+
+/* 两种画面风格：字符（内置位图字体）与色块（每格上下两个像素，终端里是一个 ▀） */
+#define STYLE_CHAR 0
+#define STYLE_BLOCK 1
+
 static double now_seconds(void)
 {
     struct timespec ts;
@@ -1584,8 +1709,31 @@ static void compute_layout(const Profile *p, int req_cols, int video_w, int vide
     L->off_y = ((p->height - rows * cell_h) / 2) & ~1;
 }
 
+/*
+ * 转换回调：TUI 用。传 NULL 时整条管线照旧只往 stdout 打印，命令行行为不变。
+ * on_progress 每帧都会调用（重绘由 TUI 自己节流），eta 为负表示还估不出来。
+ */
+typedef struct {
+    void *ud;
+    void (*on_progress)(void *ud, long long src_done, long long src_total,
+                        long long out_frames, double elapsed, double eta);
+    int (*should_abort)(void *ud); /* 非 0 表示用户要中途取消 */
+} ConvertHooks;
+
+/* 只给命令行用的提示：TUI 模式下不往屏幕上打 */
+static void say(const ConvertHooks *hooks, const char *fmt, ...)
+{
+    if (hooks) {
+        return;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+}
+
 static int convert(const char *input, const char *output, int req_cols, const Profile *p,
-                   const VideoInfo *vp)
+                   const VideoInfo *vp, const ConvertHooks *hooks, int style)
 {
     int ret = 0;
     GlyphAtlas atlas;
@@ -1608,26 +1756,29 @@ static int convert(const char *input, const char *output, int req_cols, const Pr
     Layout L;
     compute_layout(p, req_cols, info.width, info.height, &L);
 
-    printf("输出规格: %dx%d @ %dfps（档位 %s，%s编码）\n", p->width, p->height, p->fps,
-           p->name, p->enc->hardware ? "硬件" : "软件");
-    printf("ASCII网格: %dx%d 字符，每个字符 %dx%d 像素\n", L.cols, L.rows, L.cell_w, L.cell_h);
+    say(hooks, "输出规格: %dx%d @ %dfps（档位 %s，%s编码）\n", p->width, p->height, p->fps,
+        p->name, p->enc->hardware ? "硬件" : "软件");
+    say(hooks, "ASCII网格: %dx%d 字符，每个字符 %dx%d 像素\n", L.cols, L.rows, L.cell_w,
+        L.cell_h);
     if (L.off_x > 0 || L.off_y > 0) {
-        printf("画面居中显示，黑边: 左右各 %d 像素，上下各 %d 像素\n", L.off_x, L.off_y);
+        say(hooks, "画面居中显示，黑边: 左右各 %d 像素，上下各 %d 像素\n", L.off_x, L.off_y);
     }
     if ((int)lround(src_fps) > p->fps) {
-        printf("提示: 输入是 %.2ffps，输出取 %dfps（补到更高帧率只会重复帧，画面不会更流畅）\n",
-               src_fps, p->fps);
+        say(hooks, "提示: 输入是 %.2ffps，输出取 %dfps（补到更高帧率只会重复帧，画面不会更流畅）\n",
+            src_fps, p->fps);
     } else if (src_fps + 0.5 < p->fps) {
-        printf("提示: 输入是 %.2ffps，将通过重复帧补到 %dfps\n", src_fps, p->fps);
+        say(hooks, "提示: 输入是 %.2ffps，将通过重复帧补到 %dfps\n", src_fps, p->fps);
     }
 
-    /* 步骤4：预渲染字形图集 */
+    /* 步骤4：预渲染字形图集（色块风格用不上） */
     build_gamma_lut();
-    if (!atlas_build(&atlas, L.cell_w, L.cell_h)) {
+    if (style == STYLE_CHAR && !atlas_build(&atlas, L.cell_w, L.cell_h)) {
         fprintf(stderr, "字形图集生成失败\n");
         goto cleanup;
     }
-    printf("使用字符集: %d 个字符（由暗到亮）\n[%s]\n", FONT_CHAR_COUNT, atlas.chars);
+    if (style == STYLE_CHAR) {
+        say(hooks, "使用字符集: %d 个字符（由暗到亮）\n[%s]\n", FONT_CHAR_COUNT, atlas.chars);
+    }
 
     /* 步骤5：启动解码和编码两个 ffmpeg 进程
      * 编码器已经在 choose_profile 里真跑过 8 帧，这里直接用选中的那个 */
@@ -1635,7 +1786,7 @@ static int convert(const char *input, const char *output, int req_cols, const Pr
     if (!enc_args) {
         goto cleanup;
     }
-    printf("视频编码器: %s%s\n", p->enc->codec, p->enc->hardware ? "（硬件）" : "");
+    say(hooks, "视频编码器: %s%s\n", p->enc->codec, p->enc->hardware ? "（硬件）" : "");
 
     qin = shell_quote(input);
     qout = shell_quote(output);
@@ -1644,10 +1795,12 @@ static int convert(const char *input, const char *output, int req_cols, const Pr
         goto cleanup;
     }
 
-    /* 解码：统一为源帧率 -> 缩放到 ASCII 网格大小（面积插值）-> 原始 RGB24 输出到管道 */
+    /* 解码：统一为源帧率 -> 缩放到采样网格 -> 原始 RGB24 输出到管道。
+     * 色块风格纵向要两个采样点，所以行数翻倍 */
+    const int cell_rows = style == STYLE_BLOCK ? L.rows * 2 : L.rows;
     dec_cmd = xasprintf("ffmpeg -nostdin -v error -i %s -an -sn "
                         "-vf 'fps=%ld/%ld,scale=%d:%d:flags=area' -f rawvideo -pix_fmt rgb24 pipe:1",
-                        qin, info.fps_num, info.fps_den, L.cols, L.rows);
+                        qin, info.fps_num, info.fps_den, L.cols, cell_rows);
     /* 编码：从管道读取画布的 RGB 帧，转成 BT.709 的 yuv420p 并打上色彩标签，
      * 同时从原视频取第一条音轨（没有音轨则忽略）。
      * 硬件编码器需要的 -i 前参数（如 vaapi 设备）必须和探测时完全一致 */
@@ -1665,7 +1818,7 @@ static int convert(const char *input, const char *output, int req_cols, const Pr
         goto cleanup;
     }
 
-    const size_t cell_bytes = (size_t)L.cols * L.rows * 3;
+    const size_t cell_bytes = (size_t)L.cols * cell_rows * 3;
     const size_t canvas_stride = (size_t)p->width * 3;
     const size_t canvas_bytes = canvas_stride * (size_t)p->height;
     cells = malloc(cell_bytes);
@@ -1684,11 +1837,12 @@ static int convert(const char *input, const char *output, int req_cols, const Pr
     }
 
     /* 步骤6：逐帧处理 */
-    printf("开始转换视频...\n");
+    say(hooks, "开始转换视频...\n");
     int64_t src_index = 0;   /* 已读取的源帧数 */
     int64_t out_frames = 0;  /* 已写出的输出帧数 */
     const double start = now_seconds();
     int write_failed = 0;
+    int aborted = 0;
 
     while (fread(cells, 1, cell_bytes, dec) == cell_bytes) {
         /* 第 i 帧源画面要在输出帧率里占几帧：floor((i+1)*out/fps) - floor(i*out/fps)
@@ -1699,7 +1853,12 @@ static int convert(const char *input, const char *output, int req_cols, const Pr
         src_index++;
 
         if (repeat > 0) {
-            render_frame(&atlas, cells, L.cols, L.rows, grid_origin, canvas_stride);
+            if (style == STYLE_BLOCK) {
+                render_block_cells(cells, L.cols, L.rows, grid_origin, canvas_stride, L.cell_w,
+                                   L.cell_h);
+            } else {
+                render_frame(&atlas, cells, L.cols, L.rows, grid_origin, canvas_stride);
+            }
             for (int64_t k = 0; k < repeat; ++k) {
                 if (fwrite(canvas, 1, canvas_bytes, enc) != canvas_bytes) {
                     write_failed = 1;
@@ -1712,7 +1871,24 @@ static int convert(const char *input, const char *output, int req_cols, const Pr
             }
         }
 
-        if (src_index % 30 == 0) {
+        if (hooks) {
+            /* TUI：每帧报一次进度，重绘由回调自己节流；取消也在这里查 */
+            const double elapsed = now_seconds() - start;
+            double eta = -1;
+            if (info.total_frames > 0 && src_index > 0) {
+                eta = elapsed / (double)src_index * (double)(info.total_frames - src_index);
+                eta = eta < 0 ? 0 : eta;
+            }
+            if (hooks->on_progress) {
+                hooks->on_progress(hooks->ud, (long long)src_index,
+                                   (long long)info.total_frames, (long long)out_frames, elapsed,
+                                   eta);
+            }
+            if (hooks->should_abort && hooks->should_abort(hooks->ud)) {
+                aborted = 1;
+                break;
+            }
+        } else if (src_index % 30 == 0) {
             printf("\r进度: %lld/%ld", (long long)src_index, info.total_frames);
             if (info.total_frames > 0) {
                 const double elapsed = now_seconds() - start;
@@ -1722,7 +1898,16 @@ static int convert(const char *input, const char *output, int req_cols, const Pr
             fflush(stdout);
         }
     }
-    printf("\n");
+    if (!aborted) {
+        say(hooks, "\n");
+    }
+
+    if (aborted) {
+        /* 中途取消：两个 ffmpeg 交给 cleanup 里的 pclose 收掉，半成品删掉 */
+        fprintf(stderr, "已取消\n");
+        remove(output);
+        goto cleanup;
+    }
 
     /* 步骤7：关闭管道，等待 ffmpeg 收尾（编码器在这里完成音频合并并写完文件） */
     const int dec_status = pclose(dec);
@@ -1744,10 +1929,10 @@ static int convert(const char *input, const char *output, int req_cols, const Pr
         fprintf(stderr, "警告: 解码过程中出现错误，输出视频可能不完整\n");
     }
 
-    printf("转换完成! 源帧数: %lld，输出帧数: %lld (%dfps)\n", (long long)src_index,
-           (long long)out_frames, p->fps);
-    printf("已合并原视频音频（原视频没有音轨则无声）\n");
-    printf("输出文件: %s\n", output);
+    say(hooks, "转换完成! 源帧数: %lld，输出帧数: %lld (%dfps)\n", (long long)src_index,
+        (long long)out_frames, p->fps);
+    say(hooks, "已合并原视频音频（原视频没有音轨则无声）\n");
+    say(hooks, "输出文件: %s\n", output);
     ret = 1;
 
 cleanup:
@@ -1765,6 +1950,84 @@ cleanup:
     free(dec_cmd);
     free(enc_cmd);
     return ret;
+}
+
+typedef struct {
+    Profile prof;
+    VideoInfo info;
+} ConvertOutcome;
+
+/*
+ * 命令行与 TUI 共用的整条管线：
+ *   读视频信息 → 选档位与编码器 → 转换 → 抽查末段帧数 → 硬件失败退回软件 → 补色标
+ * verbose 由 hooks 是否为 NULL 决定：CLI 打印全部提示，TUI 一个字都不打。
+ * cancelled 指向调用方的取消标志（CLI 传 NULL）：用户取消后不要再用软件重试一遍。
+ */
+static int run_convert(const char *input, const char *output, int cols, const char *quality,
+                       const ConvertHooks *hooks, ConvertOutcome *out, int *cancelled, int style,
+                       int ratio, int fps_want)
+{
+    const int verbose = hooks == NULL;
+
+    if (!probe_video(input, &out->info)) {
+        if (verbose) {
+            fprintf(stderr, "无法读取视频信息: %s\n", input);
+        }
+        return 0;
+    }
+    const double src_fps = (double)out->info.fps_num / out->info.fps_den;
+    if (verbose) {
+        printf("视频信息: %dx%d, %.3ffps, %ld帧\n", out->info.width, out->info.height, src_fps,
+               out->info.total_frames);
+    }
+
+    memset(&out->prof, 0, sizeof out->prof);
+    if (!choose_profile_ex(quality, ratio, fps_want, &out->info, &out->prof)) {
+        fprintf(stderr, "错误: 没有可用的视频编码器，或质量参数无效\n");
+        return 0;
+    }
+    if (verbose) {
+        printf("性能诊断: %d 核 / %ld MB 内存 / 预算 %.2f CPU秒每视频秒\n", cpu_cores(),
+               total_memory_mb(), cpu_cores() * CPU_BUDGET_RATIO);
+    }
+
+    int ok = convert(input, output, cols, &out->prof, &out->info, hooks, style);
+
+    /* 硬件编码器可能"成功"却漏帧，抽查最后一秒；不合格就当失败走软件重试 */
+    if (ok && out->prof.enc->hardware && !output_tail_ok(output, &out->prof)) {
+        fprintf(stderr, "硬件编码的输出缺帧，改用软件编码重做一次\n");
+        ok = 0;
+    }
+
+    /* 硬件编码器在真机上仍可能中途失败（驱动/会话被占用），自动退回软件再试一次。
+     * 用户主动取消不算失败，别偷偷又跑一遍 */
+    if (!ok && !(cancelled && *cancelled) && out->prof.enc->hardware) {
+        fprintf(stderr, "硬件编码 %s 失败，改用软件编码重试一次\n", out->prof.enc->codec);
+        const EncoderCand *sw = NULL;
+        for (int i = 0; i < ENCODER_COUNT && !sw; ++i) {
+            if (ENCODERS[i].hardware || !encoder_listed(i)) {
+                continue;
+            }
+            if (encoder_works(&ENCODERS[i], out->prof.width, out->prof.height, out->prof.fps)) {
+                sw = &ENCODERS[i];
+            }
+        }
+        if (sw) {
+            out->prof.enc = sw;
+            remove(output);
+            ok = convert(input, output, cols, &out->prof, &out->info, hooks, style);
+        }
+    }
+
+    if (!ok) {
+        return 0;
+    }
+
+    /* libx264 已经通过 -x264-params 写全了色标，其它编码器补一次 */
+    if (strcmp(out->prof.enc->codec, "libx264") != 0 && stamp_bt709(output) && verbose) {
+        printf("色标: 已补写 BT.709（该编码器本身不写 color_primaries）\n");
+    }
+    return 1;
 }
 
 /* ---------------------------- 入口 ---------------------------- */
@@ -1988,19 +2251,23 @@ static int sb_addf(StrBuf *sb, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    char tmp[64];
-    const int n = vsnprintf(tmp, sizeof tmp, fmt, ap);
+    va_list ap2;
+    va_copy(ap2, ap);
+    const int n = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
+    /* 先问长度再扩容：早先用 64 字节临时缓冲，长串会 memcpy 越界读栈 */
     if (n <= 0 || !sb_reserve(sb, (size_t)n + 1)) {
+        va_end(ap2);
         return 0;
     }
-    memcpy(sb->buf + sb->len, tmp, (size_t)n);
+    vsnprintf(sb->buf + sb->len, (size_t)n + 1, fmt, ap2);
+    va_end(ap2);
     sb->len += (size_t)n;
     return 1;
 }
 
 static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, int play_fps,
-                         int with_audio)
+                         int with_audio, int style)
 {
     GlyphAtlas atlas;
     memset(&atlas, 0, sizeof atlas);
@@ -2011,13 +2278,14 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
     int ret = 0;
 
     build_gamma_lut();
-    /* 只借用图集里的字符顺序与亮度查找表，字符位图本身用不上 */
-    if (!atlas_build(&atlas, 8, 16)) {
+    /* 字符风格只借用图集里的字符顺序与亮度查找表；色块风格完全用不上 */
+    if (style == STYLE_CHAR && !atlas_build(&atlas, 8, 16)) {
         fprintf(stderr, "字形图集生成失败\n");
         return 0;
     }
 
-    /* 网格：列宽按参数，行数按视频宽高比；终端放不下就缩列数 */
+    /* 网格：列宽按参数，行数按视频宽高比；终端放不下就缩列数。
+     * 色块风格每格上下两个像素，所以解码高度要翻倍 */
     int cols = req_cols;
     const int aspect_rows = (int)lround((double)cols * vp->height / vp->width * 0.5);
     int rows = aspect_rows < 1 ? 1 : aspect_rows;
@@ -2027,8 +2295,9 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
         cols = (int)lround((double)rows * vp->width / vp->height * 2.0);
         cols = cols < 8 ? 8 : cols;
     }
+    const int pix_rows = style == STYLE_BLOCK ? rows * 2 : rows;
 
-    const size_t cell_bytes = (size_t)cols * rows * 3;
+    const size_t cell_bytes = (size_t)cols * pix_rows * 3;
     cells = malloc(cell_bytes);
     if (!cells) {
         goto cleanup;
@@ -2040,7 +2309,7 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
     }
     cmd = xasprintf("ffmpeg -nostdin -v error -i %s -an -sn -vf 'fps=%d,scale=%d:%d:flags=area' "
                     "-f rawvideo -pix_fmt rgb24 pipe:1 2>/dev/null",
-                    qin, play_fps, cols, rows);
+                    qin, play_fps, cols, pix_rows);
     if (!cmd) {
         goto cleanup;
     }
@@ -2070,11 +2339,46 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
         if (!sb_addf(&sb, "\x1b[H")) {
             break;
         }
-        int last_r = -1, last_g = -1, last_b = -1;
+        int last_r = -1, last_g = -1, last_b = -1;    /* 字符风格：前色 */
+        int last_br = -1, last_bgc = -1, last_bb = -1; /* 色块风格：背景色 */
         for (int y = 0; y < rows; ++y) {
             for (int x = 0; x < cols; ++x) {
-                const uint8_t *px = cells + ((size_t)y * cols + x) * 3;
+                const uint8_t *px = cells + ((size_t)(style == STYLE_BLOCK ? y * 2 : y) * cols + x) * 3;
                 const int r = px[0], g = px[1], b = px[2];
+
+                if (style == STYLE_BLOCK) {
+                    /* 一个格子画 ▀：前色是上半像素，背景是下半像素 */
+                    const uint8_t *pn = cells + ((size_t)(y * 2 + 1) * cols + x) * 3;
+                    int fr, fgn, fb, br, bgn, bb;
+                    make_cell_color(r, g, b, &fr, &fgn, &fb);
+                    make_cell_color(pn[0], pn[1], pn[2], &br, &bgn, &bb);
+                    if (fr != last_r || fgn != last_g || fb != last_b) {
+                        if (!sb_addf(&sb, "\x1b[38;2;%d;%d;%dm", fr, fgn, fb)) {
+                            quit = 1;
+                            break;
+                        }
+                        last_r = fr;
+                        last_g = fgn;
+                        last_b = fb;
+                    }
+                    if (br != last_br || bgn != last_bgc || bb != last_bb) {
+                        if (!sb_addf(&sb, "\x1b[48;2;%d;%d;%dm", br, bgn, bb)) {
+                            quit = 1;
+                            break;
+                        }
+                        last_br = br;
+                        last_bgc = bgn;
+                        last_bb = bb;
+                    }
+                    if (!sb_reserve(&sb, 3)) {
+                        quit = 1;
+                        break;
+                    }
+                    memcpy(sb.buf + sb.len, "\xe2\x96\x80", 3); /* ▀ */
+                    sb.len += 3;
+                    continue;
+                }
+
                 const double lum = RED_WEIGHT * r + GREEN_WEIGHT * g + BLUE_WEIGHT * b;
                 int level = (int)(lum + 0.5);
                 level = level < 0 ? 0 : (level > 255 ? 255 : level);
@@ -2100,6 +2404,7 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
                 break;
             }
             last_r = last_g = last_b = -1; /* 行末复位颜色 */
+            last_br = last_bgc = last_bb = -1;
         }
         if (quit) {
             break;
@@ -2135,8 +2440,1547 @@ cleanup:
     return ret;
 }
 
+/* ---------------------------- 终端界面（TUI） ---------------------------- */
+
+/*
+ * 屏幕流：欢迎页（MIKU 大字 + 随机歌词 + 三个入口）→ 配置页（转换 / 播放各一套）
+ *        → 进度页 → 完成页。
+ * 终端原语与 play_terminal 同源：termios 存档、备用屏、select 读键、整帧拼进
+ * 一个 StrBuf 再一次性写出。鼠标与触屏走 SGR 1006 报告，点在哪一行就选中哪一项。
+ */
+
+#define UI_NONE (-1)
+#define UI_UP 1001
+#define UI_DOWN 1002
+#define UI_LEFT 1003
+#define UI_RIGHT 1004
+#define UI_CLICK 1005
+#define UI_WHEEL_UP 1006
+#define UI_WHEEL_DOWN 1007
+#define UI_TEXT_BYTE 256 /* >= 这个数表示一个 UTF-8 字节：b = k - UI_TEXT_BYTE */
+#define UI_PATH_MAX 512
+#define UI_HIT_MAX 16
+
+#define UI_RESET "\x1b[0m"
+#define UI_DIM "\x1b[2m"
+#define UI_BOLD "\x1b[1m"
+#define UI_ACCENT "\x1b[36m"
+#define UI_GOOD "\x1b[32m"
+#define UI_WARN "\x1b[33m"
+#define UI_MIKU "\x1b[38;2;126;255;96m" /* 葱绿 */
+
+static struct termios g_ui_term;
+static int g_ui_raw = 0;
+static int g_ui_alt = 0;
+static volatile sig_atomic_t g_ui_stop = 0;
+static int g_ui_mx = 0, g_ui_my = 0;
+
+/* 点击命中表：每一项在屏幕上的行号，画的时候登记 */
+static int g_hit_rows[UI_HIT_MAX];
+static int g_hit_count = 0;
+
+static void ui_on_signal(int sig)
+{
+    (void)sig;
+    g_ui_stop = 1;
+}
+
+static void ui_raw_mode(void)
+{
+    if (!isatty(STDIN_FILENO) || tcgetattr(STDIN_FILENO, &g_ui_term) != 0) {
+        return;
+    }
+    struct termios t = g_ui_term;
+    t.c_lflag &= ~(tcflag_t)(ICANON | ECHO);
+    t.c_cc[VMIN] = 0;
+    t.c_cc[VTIME] = 0;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &t) == 0) {
+        g_ui_raw = 1;
+    }
+}
+
+/* 交还终端：关鼠标上报、退出备用屏、恢复光标与折行、还原 termios。幂等 */
+static void ui_leave(void)
+{
+    if (!g_ui_alt) {
+        return;
+    }
+    g_ui_alt = 0;
+    fputs(UI_RESET "\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l", stdout);
+    fflush(stdout);
+    if (g_ui_raw) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_ui_term);
+        g_ui_raw = 0;
+    }
+}
+
+static void ui_enter(void)
+{
+    ui_raw_mode();
+    signal(SIGINT, ui_on_signal);
+    signal(SIGTERM, ui_on_signal);
+    /* 1000 = 按下/松开上报，1006 = SGR 坐标；触屏点击通常也走这套 */
+    fputs("\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[2J", stdout);
+    fflush(stdout);
+    g_ui_alt = 1;
+}
+
+/* ---------------- 宽度计算：中文占两格 ---------------- */
+
+static int ui_utf8_len(unsigned char c)
+{
+    if (c < 0x80) {
+        return 1;
+    }
+    if ((c & 0xE0) == 0xC0) {
+        return 2;
+    }
+    if ((c & 0xF0) == 0xE0) {
+        return 3;
+    }
+    if ((c & 0xF8) == 0xF0) {
+        return 4;
+    }
+    return 1;
+}
+
+static unsigned ui_codepoint(const unsigned char *s, int len)
+{
+    if (len <= 1) {
+        return s[0];
+    }
+    unsigned cp = s[0] & (unsigned)(0xFFu >> (len + 1));
+    for (int i = 1; i < len; ++i) {
+        cp = (cp << 6) | (unsigned)(s[i] & 0x3F);
+    }
+    return cp;
+}
+
+static int ui_cell_width(unsigned cp)
+{
+    if (cp < 32 || (cp >= 0x7f && cp < 0xa0)) {
+        return 0;
+    }
+    if ((cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0x303e) ||
+        (cp >= 0x3041 && cp <= 0x33ff) || (cp >= 0x3400 && cp <= 0x4dbf) ||
+        (cp >= 0x4e00 && cp <= 0x9fff) || (cp >= 0xa000 && cp <= 0xa4cf) ||
+        (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) ||
+        (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff00 && cp <= 0xff60) ||
+        (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x1f300 && cp <= 0x1f9ff)) {
+        return 2;
+    }
+    return 1;
+}
+
+static int ui_text_width(const char *s)
+{
+    int w = 0;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        const int len = ui_utf8_len(*p);
+        w += ui_cell_width(ui_codepoint(p, len));
+        p += len;
+    }
+    return w;
+}
+
+static void ui_add_text(StrBuf *sb, const char *s, int max_w)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    int used = 0;
+    while (*p) {
+        const int len = ui_utf8_len(*p);
+        const int w = ui_cell_width(ui_codepoint(p, len));
+        if (max_w >= 0 && used + w > max_w) {
+            break;
+        }
+        if (!sb_reserve(sb, (size_t)len)) {
+            return;
+        }
+        memcpy(sb->buf + sb->len, p, (size_t)len);
+        sb->len += (size_t)len;
+        used += w;
+        p += len;
+    }
+}
+
+static void ui_add_text_tail(StrBuf *sb, const char *s, int max_w)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    if (max_w < 2) {
+        ui_add_text(sb, s, max_w);
+        return;
+    }
+    while (*p && ui_text_width((const char *)p) > max_w - 1) {
+        p += ui_utf8_len(*p);
+    }
+    if (p != (const unsigned char *)s) {
+        sb_addf(sb, "…");
+    }
+    ui_add_text(sb, (const char *)p, max_w - 1);
+}
+
+/* 居中文本：返回起始列，调用方负责定位 */
+static int ui_center_col(int width, int cols)
+{
+    const int left = (cols - width) / 2;
+    return left < 0 ? 0 : left;
+}
+
+static void ui_pad(StrBuf *sb, int n)
+{
+    for (int i = 0; i < n; ++i) {
+        sb_addf(sb, " ");
+    }
+}
+
+static void ui_row(StrBuf *sb, int row)
+{
+    sb_addf(sb, "\x1b[%d;1H\x1b[2K", row);
+}
+
+static void ui_flush(StrBuf *sb)
+{
+    if (sb->len > 0) {
+        fwrite(sb->buf, 1, sb->len, stdout);
+        sb->len = 0;
+    }
+    fflush(stdout);
+}
+
+static void ui_clear_screen(void)
+{
+    fputs("\x1b[H\x1b[2J", stdout);
+    fflush(stdout);
+}
+
+/* 读一个键；timeout_ms < 0 表示一直等 */
+static int ui_key(int timeout_ms)
+{
+    if (!g_ui_raw) {
+        return UI_NONE;
+    }
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(STDIN_FILENO, &fds);
+    struct timeval tv;
+    struct timeval *tvp = NULL; /* NULL = 一直等；负毫秒塞进 timeval 会让 select 报 EINVAL */
+    if (timeout_ms >= 0) {
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        tvp = &tv;
+    }
+    if (select(STDIN_FILENO + 1, &fds, NULL, NULL, tvp) <= 0) {
+        return UI_NONE;
+    }
+    unsigned char c = 0;
+    if (read(STDIN_FILENO, &c, 1) != 1) {
+        return UI_NONE;
+    }
+    if (c == 0x1b) {
+        int seq[24];
+        int n = 0;
+        if (ui_key(20) != '[') {
+            return 27; /* 单独一个 Esc */
+        }
+        int last = UI_NONE;
+        for (;;) {
+            last = ui_key(20);
+            if (last == UI_NONE) {
+                return UI_NONE;
+            }
+            if (last >= 0x40 && last <= 0x7e && last < UI_TEXT_BYTE) {
+                break;
+            }
+            if (n < 23) {
+                seq[n++] = last;
+            }
+        }
+        if (n == 0) {
+            if (last == 'A') return UI_UP;
+            if (last == 'B') return UI_DOWN;
+            if (last == 'C') return UI_RIGHT;
+            if (last == 'D') return UI_LEFT;
+            return UI_NONE;
+        }
+        if (seq[0] == '<' && (last == 'M' || last == 'm')) { /* SGR 鼠标 */
+            char buf[40];
+            int k = 0;
+            for (int i = 0; i < n && k < 39; ++i) {
+                buf[k++] = (char)seq[i];
+            }
+            buf[k] = '\0';
+            int btn = 0, mx = 0, my = 0;
+            if (sscanf(buf, "<%d;%d;%d", &btn, &mx, &my) == 3) {
+                g_ui_mx = mx;
+                g_ui_my = my;
+                if ((btn & 64) != 0) {
+                    return (btn & 1) ? UI_WHEEL_DOWN : UI_WHEEL_UP;
+                }
+                return UI_CLICK;
+            }
+        }
+        return UI_NONE; /* 其它序列整段丢掉 */
+    }
+    if (c >= 0x80) {
+        return UI_TEXT_BYTE + (int)c;
+    }
+    if (c == 8) {
+        return 127;
+    }
+    return (int)c;
+}
+
+/* 把鼠标行号换算成焦点下标；返回 -1 表示没点在任何一项上 */
+static int ui_hit_index(int row)
+{
+    for (int i = 0; i < g_hit_count; ++i) {
+        if (g_hit_rows[i] == row) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void ui_hit_reset(void)
+{
+    g_hit_count = 0;
+}
+
+static void ui_hit_add(int row)
+{
+    if (g_hit_count < UI_HIT_MAX) {
+        g_hit_rows[g_hit_count++] = row;
+    }
+}
+
+/* ---------------- 欢迎页 ---------------- */
+
+/*
+ * 大字用 7×7 的位图定义，运行时把上下两行合成半块字符（▀▄█）。
+ * 终端格子是 1:2，直接用整块画会被纵向拉长一倍，所以这里一个格子当两个方像素用。
+ */
+static const char *UI_LOGO[4][8] = {
+    {"##   ##", "##   ##", "### ###", "## # ##", "##   ##", "##   ##", "##   ##", "##   ##"},
+    {"#####", "  ## ", "  ## ", "  ## ", "  ## ", "  ## ", "#####", "#####"},
+    {"##   ##", "##  ## ", "## ##  ", "####   ", "####   ", "## ##  ", "##  ## ", "##   ##"},
+    {"##   ##", "##   ##", "##   ##", "##   ##", "##   ##", "##   ##", " ## ## ", "  ###  "},
+};
+static const int UI_LOGO_W[4] = {7, 5, 7, 7};
+
+static int ui_logo_width(void)
+{
+    int w = 0;
+    for (int i = 0; i < 4; ++i) {
+        w += UI_LOGO_W[i];
+    }
+    return w + 3; /* 三个单格间隔 */
+}
+
+static void ui_draw_logo(StrBuf *sb, int top, int cols)
+{
+    const int total = ui_logo_width();
+    for (int cr = 0; cr < 4; ++cr) {
+        ui_row(sb, top + cr);
+        ui_pad(sb, ui_center_col(total, cols));
+        sb_addf(sb, UI_MIKU UI_BOLD);
+        for (int l = 0; l < 4; ++l) {
+            for (int c = 0; c < UI_LOGO_W[l]; ++c) {
+                const int t = UI_LOGO[l][cr * 2][c] == '#';
+                const int b = UI_LOGO[l][cr * 2 + 1][c] == '#';
+                sb_addf(sb, "%s", (t && b) ? "█" : (t ? "▀" : (b ? "▄" : " ")));
+            }
+            if (l < 3) {
+                sb_addf(sb, " ");
+            }
+        }
+        sb_addf(sb, UI_RESET);
+    }
+}
+
+/* 随机歌词：单句，全部逐条核对过原文（注释是曲名 / 作者，屏幕上只打歌词那一行） */
+static const char *UI_LYRICS[] = {
+    "千本桜 夜ニ紛レ",                            /* 千本桜 / 黒うさP */
+    "メルト 溶けてしまいそう",                     /* メルト / ryo */
+    "世界で一番おひめさま",                        /* ワールドイズマイン / ryo */
+    "だから妄想感傷代償連盟 愛を懐いて理想を号んだ", /* 妄想感傷代償連盟 / DECO*27 */
+    "終わんない愛を抱いていたくないの",             /* ヒバナ / DECO*27 */
+    "誰も知らない おとぎばなし",                    /* 六兆年と一夜物語 / kemu */
+    "今後千年草も生えない 砂の惑星さ",              /* 砂の惑星 / ハチ */
+    "愛のネタバレ「別れ」っぽいな",                  /* 神っぽいな / ピノキオピー */
+    "あたしヴァンパイア",                          /* ヴァンパイア / DECO*27 */
+    "私の恋を悲劇のジュリエットにしないで",          /* ロミオとシンデレラ / doriko */
+    "所詮 ヒトの真似事だと",                       /* 初音ミクの消失 / cosMo@暴走P */
+    "君に伝えたいことが 君に届けたいことが",         /* Tell Your World / livetune */
+};
+#define UI_LYRIC_COUNT ((int)(sizeof UI_LYRICS / sizeof UI_LYRICS[0]))
+
+static const char *UI_MENU[3] = {"视频转换", "视频播放", "退出"};
+#define UI_MENU_COUNT 3
+
+static int ui_home(void)
+{
+    static int focus = 0;
+    const char *lyric = UI_LYRICS[(unsigned)rand() % UI_LYRIC_COUNT];
+    int chosen = -1;
+
+    while (chosen < 0 && !g_ui_stop) {
+        int cols = terminal_columns();
+        int rows = terminal_rows();
+        if (cols <= 0) {
+            cols = 80;
+        }
+        if (rows <= 0) {
+            rows = 24;
+        }
+
+        StrBuf sb = {NULL, 0, 0};
+        ui_clear_screen();
+        const int logo_top = rows > 18 ? 3 : 2;
+        ui_draw_logo(&sb, logo_top, cols);
+
+        /* 歌词紧贴在大字下面一行 */
+        ui_row(&sb, logo_top + 5);
+        ui_pad(&sb, ui_center_col(ui_text_width(lyric), cols));
+        sb_addf(&sb, UI_DIM);
+        ui_add_text(&sb, lyric, cols - 1);
+        sb_addf(&sb, UI_RESET);
+
+        ui_hit_reset();
+        const int menu_top = logo_top + 8;
+        const int menu_left = ui_center_col(16, cols);
+        for (int i = 0; i < UI_MENU_COUNT; ++i) {
+            const int row = menu_top + i * 2;
+            ui_hit_add(row);
+            ui_row(&sb, row);
+            ui_pad(&sb, menu_left);
+            if (i == focus) {
+                sb_addf(&sb, UI_GOOD UI_BOLD "▶ " UI_MIKU);
+                ui_add_text(&sb, UI_MENU[i], cols - 2);
+                sb_addf(&sb, UI_RESET);
+            } else {
+                sb_addf(&sb, UI_DIM "  " UI_RESET);
+                ui_add_text(&sb, UI_MENU[i], cols - 2);
+            }
+        }
+
+        ui_row(&sb, rows - 1);
+        sb_addf(&sb, UI_DIM);
+        ui_pad(&sb, ui_center_col(30, cols));
+        ui_add_text(&sb, "↑↓/点按 选择   Enter 确认   q 退出", cols - 1);
+        sb_addf(&sb, UI_RESET);
+        ui_flush(&sb);
+        free(sb.buf);
+
+        const int k = ui_key(-1);
+        if (k == UI_NONE) {
+            continue;
+        }
+        if (k == 'q' || k == 27 || k == 3) {
+            return 2;
+        }
+        if (k == UI_UP || k == 'k') {
+            focus = (focus + UI_MENU_COUNT - 1) % UI_MENU_COUNT;
+            continue;
+        }
+        if (k == UI_DOWN || k == 'j' || k == '\t') {
+            focus = (focus + 1) % UI_MENU_COUNT;
+            continue;
+        }
+        if (k == UI_WHEEL_UP || k == UI_WHEEL_DOWN) {
+            focus = (focus + (k == UI_WHEEL_DOWN ? 1 : UI_MENU_COUNT - 1)) % UI_MENU_COUNT;
+            continue;
+        }
+        if (k == UI_CLICK) {
+            const int hit = ui_hit_index(g_ui_my);
+            if (hit >= 0) {
+                focus = hit;
+                chosen = hit;
+            }
+            continue;
+        }
+        if (k == '\r' || k == '\n') {
+            chosen = focus;
+        }
+    }
+    return chosen < 0 ? 2 : chosen;
+}
+
+
+/* ---------------- 单列文件选择器 ---------------- */
+
+/* 目录项：名字 + 是否目录。列表不用树，手机上就是一列。 */
+typedef struct {
+    char name[256];
+    int is_dir;
+} DirEntry;
+
+static int ui_is_video(const char *name)
+{
+    static const char *exts[] = {"mp4", "mkv", "mov", "webm", "avi", "m4v", "ts",
+                                 "flv", "wmv", "mpg", "mpeg", "3gp", "ogv"};
+    const char *dot = strrchr(name, '.');
+    if (!dot) {
+        return 0;
+    }
+    for (size_t i = 0; i < sizeof exts / sizeof exts[0]; ++i) {
+        const char *a = dot + 1;
+        const char *b = exts[i];
+        while (*a && *b && (*a | 0x20) == *b) {
+            ++a;
+            ++b;
+        }
+        if (*a == '\0' && *b == '\0') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int ui_cmp_entry(const void *pa, const void *pb)
+{
+    const DirEntry *x = pa, *y = pb;
+    if (x->is_dir != y->is_dir) {
+        return y->is_dir - x->is_dir; /* 目录排在前面 */
+    }
+    return strcmp(x->name, y->name);
+}
+
+static int ui_load_dir(const char *dir, DirEntry **out, int *count)
+{
+    DIR *d = opendir(dir);
+    if (!d) {
+        return 0;
+    }
+    DirEntry *list = NULL;
+    int n = 0, cap = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0) {
+            continue;
+        }
+        int is_dir;
+        if (strcmp(de->d_name, "..") == 0) {
+            is_dir = 1;
+        } else {
+            char path[1400];
+            snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
+            struct stat st;
+            if (stat(path, &st) != 0) {
+                continue; /* 没权限的一律不显示 */
+            }
+            is_dir = S_ISDIR(st.st_mode);
+            if (!is_dir && !ui_is_video(de->d_name)) {
+                continue; /* 只列视频，别的文件不挤进来 */
+            }
+        }
+        if (n == cap) {
+            const int ncap = cap ? cap * 2 : 32;
+            DirEntry *tmp = realloc(list, (size_t)ncap * sizeof *tmp);
+            if (!tmp) {
+                free(list);
+                closedir(d);
+                return 0;
+            }
+            list = tmp;
+            cap = ncap;
+        }
+        snprintf(list[n].name, sizeof list[n].name, "%s", de->d_name);
+        list[n].is_dir = is_dir;
+        ++n;
+    }
+    closedir(d);
+    qsort(list, (size_t)n, sizeof *list, ui_cmp_entry);
+    *out = list;
+    *count = n;
+    return 1;
+}
+
+static void ui_parent_dir(char *dir)
+{
+    char *slash = strrchr(dir, '/');
+    if (!slash) {
+        snprintf(dir, 4, ".");
+    } else if (slash == dir) {
+        dir[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+}
+
+static void ui_join(char *dst, size_t cap, const char *dir, const char *name)
+{
+    if (strcmp(dir, "/") == 0) {
+        snprintf(dst, cap, "/%s", name);
+    } else {
+        snprintf(dst, cap, "%s/%s", dir, name);
+    }
+}
+
+/* 返回 1 = 选中（out 是路径），0 = 取消 */
+static int ui_pick_file(char *out, size_t cap, const char *start)
+{
+    char dir[1024];
+    snprintf(dir, sizeof dir, "%s", (start && *start) ? start : ".");
+    struct stat st;
+    if (stat(dir, &st) == 0 && !S_ISDIR(st.st_mode)) {
+        ui_parent_dir(dir); /* 传进来是文件就从它所在目录开始 */
+    }
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        snprintf(dir, sizeof dir, ".");
+    }
+
+    DirEntry *list = NULL;
+    int count = 0;
+    if (!ui_load_dir(dir, &list, &count)) {
+        snprintf(dir, sizeof dir, ".");
+        ui_load_dir(dir, &list, &count);
+    }
+    int sel = 0, top = 0;
+
+    for (;;) {
+        int cols = terminal_columns();
+        int rows = terminal_rows();
+        if (cols <= 0) {
+            cols = 80;
+        }
+        if (rows <= 0) {
+            rows = 24;
+        }
+        const int list_top = 4;
+        const int visible = rows - list_top - 2;
+        if (sel < top) {
+            top = sel;
+        }
+        if (sel >= top + visible) {
+            top = sel - visible + 1;
+        }
+        if (top < 0) {
+            top = 0;
+        }
+
+        StrBuf sb = {NULL, 0, 0};
+        ui_clear_screen();
+        sb_addf(&sb, "\x1b[H");
+        ui_row(&sb, 1);
+        sb_addf(&sb, UI_BOLD UI_ACCENT "选择视频");
+        sb_addf(&sb, UI_RESET UI_DIM "  Enter 选定  ← 返回上级  q 取消" UI_RESET);
+        ui_row(&sb, 2);
+        sb_addf(&sb, UI_DIM);
+        ui_add_text_tail(&sb, dir, cols - 1);
+        sb_addf(&sb, UI_RESET);
+
+        for (int i = 0; i < visible; ++i) {
+            const int idx = top + i;
+            if (idx >= count) {
+                break;
+            }
+            ui_row(&sb, list_top + i);
+            const int focused = idx == sel;
+            if (focused) {
+                sb_addf(&sb, UI_ACCENT "▸ ");
+            } else {
+                sb_addf(&sb, "  ");
+            }
+            if (focused) {
+                sb_addf(&sb, UI_BOLD);
+            } else if (list[idx].is_dir) {
+                sb_addf(&sb, UI_ACCENT);
+            } else {
+                sb_addf(&sb, UI_DIM);
+            }
+            ui_add_text(&sb, list[idx].name, cols - 5);
+            if (list[idx].is_dir) {
+                sb_addf(&sb, "/");
+            }
+            sb_addf(&sb, UI_RESET);
+        }
+        if (count == 0) {
+            ui_row(&sb, list_top);
+            sb_addf(&sb, UI_DIM);
+            ui_add_text(&sb, "（这个目录里没有子目录或视频文件）", cols - 1);
+            sb_addf(&sb, UI_RESET);
+        }
+
+        ui_row(&sb, rows - 1);
+        sb_addf(&sb, UI_DIM);
+        sb_addf(&sb, "%d 项 · 当前第 %d 项", count, count ? sel + 1 : 0);
+        sb_addf(&sb, UI_RESET);
+        ui_flush(&sb);
+        free(sb.buf);
+
+        int k = ui_key(-1);
+        if (k == UI_NONE) {
+            continue;
+        }
+        if (k == 'q' || k == 27 || k == 3 || g_ui_stop) {
+            free(list);
+            return 0;
+        }
+        if (k == UI_CLICK) {
+            const int idx = top + (g_ui_my - list_top);
+            if (g_ui_my >= list_top && idx >= 0 && idx < count) {
+                sel = idx;
+                k = '\r'; /* 点一下就进去/选定 */
+            } else {
+                continue;
+            }
+        }
+        if (k == UI_UP || k == 'k' || k == UI_WHEEL_UP) {
+            sel = (sel + count - 1) % (count ? count : 1);
+            continue;
+        }
+        if (k == UI_DOWN || k == 'j' || k == UI_WHEEL_DOWN) {
+            sel = (sel + 1) % (count ? count : 1);
+            continue;
+        }
+        if (k == UI_LEFT || k == 127 || k == 'h') {
+            ui_parent_dir(dir);
+            free(list);
+            list = NULL;
+            count = 0;
+            sel = 0;
+            top = 0;
+            if (!ui_load_dir(dir, &list, &count)) {
+                snprintf(dir, sizeof dir, ".");
+                ui_load_dir(dir, &list, &count);
+            }
+            continue;
+        }
+        if (k == '\r' || k == '\n') {
+            if (count == 0) {
+                continue;
+            }
+            const DirEntry *e = &list[sel];
+            if (e->is_dir) {
+                char next[1024];
+                if (strcmp(e->name, "..") == 0) {
+                    snprintf(next, sizeof next, "%s", dir);
+                    ui_parent_dir(next);
+                } else {
+                    ui_join(next, sizeof next, dir, e->name);
+                }
+                free(list);
+                list = NULL;
+                count = 0;
+                snprintf(dir, sizeof dir, "%s", next);
+                sel = 0;
+                top = 0;
+                if (!ui_load_dir(dir, &list, &count)) {
+                    snprintf(dir, sizeof dir, ".");
+                    ui_load_dir(dir, &list, &count);
+                }
+            } else {
+                ui_join(out, cap, dir, e->name);
+                free(list);
+                return 1;
+            }
+        }
+    }
+}
+
+/* ---------------- 配置页 ---------------- */
+
+enum { CFG_INPUT = 0, CFG_STYLE, CFG_RATIO, CFG_FPS, CFG_QUALITY, CFG_OUTPUT, CFG_WIDTH,
+       CFG_START, CFG_ITEM_MAX };
+
+typedef struct {
+    char input[UI_PATH_MAX];
+    char output[UI_PATH_MAX];
+    int style;   /* STYLE_CHAR / STYLE_BLOCK */
+    int ratio;   /* 0..RATIO_COUNT-1 */
+    int fps;     /* 0 原画 / 24 / 30 / 60 */
+    int quality; /* 0 auto 1 原画 2 high 3 mid 4 low */
+    int cols_want; /* 播放宽度：0 跟随终端 */
+    int mute;
+    int focus;
+    char status[256];
+} Config;
+
+static void ui_status(Config *st, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(st->status, sizeof st->status, fmt, ap);
+    va_end(ap);
+}
+
+static void ui_derive_output(const char *in, char *out, size_t cap)
+{
+    const char *dot = strrchr(in, '.');
+    const char *slash = strrchr(in, '/');
+    size_t keep = (dot && (!slash || dot > slash)) ? (size_t)(dot - in) : strlen(in);
+    if (keep + 12 > cap) {
+        keep = cap > 12 ? cap - 12 : 0;
+    }
+    memcpy(out, in, keep);
+    out[keep] = '\0';
+    strncat(out, "-ascii.mp4", cap - keep - 1);
+}
+
+static const char *ui_style_name(int style)
+{
+    return style == STYLE_BLOCK ? "色块（半块 ▀）" : "字符（ASCII 字形）";
+}
+
+static const char *ui_fps_name(int fps)
+{
+    static char buf[16];
+    if (fps <= 0) {
+        return "原画";
+    }
+    snprintf(buf, sizeof buf, "%d", fps);
+    return buf;
+}
+
+static const char *ui_quality_name(int q)
+{
+    switch (q) {
+    case 1: return "原画分辨率";
+    case 2: return "high 2K";
+    case 3: return "mid 1080p";
+    case 4: return "low 720p";
+    default: return "自动（按设备降级）";
+    }
+}
+
+static void ui_edit_field(Config *st, int which, const char *title)
+{
+    char *buf = which == CFG_INPUT ? st->input : st->output;
+    size_t len = strlen(buf);
+    st->status[0] = '\0';
+
+    for (;;) {
+        int cols = terminal_columns();
+        if (cols <= 0) {
+            cols = 80;
+        }
+        StrBuf sb = {NULL, 0, 0};
+        ui_clear_screen();
+        sb_addf(&sb, "\x1b[H");
+        ui_row(&sb, 1);
+        sb_addf(&sb, UI_BOLD UI_ACCENT);
+        ui_add_text(&sb, title, -1);
+        sb_addf(&sb, UI_RESET);
+        ui_row(&sb, 2);
+        sb_addf(&sb, UI_DIM);
+        ui_add_text(&sb, "Enter 确认   Esc 取消   Backspace 删除", cols - 1);
+        sb_addf(&sb, UI_RESET);
+        ui_row(&sb, 4);
+        sb_addf(&sb, "> ");
+        ui_add_text_tail(&sb, buf, cols - 4);
+        sb_addf(&sb, "\x1b[7m \x1b[0m");
+        ui_flush(&sb);
+        free(sb.buf);
+
+        const int k = ui_key(-1);
+        if (k == UI_NONE || g_ui_stop) {
+            return;
+        }
+        if (k == 27) {
+            return;
+        }
+        if (k == '\r' || k == '\n') {
+            return;
+        }
+        if (k == 127) {
+            if (len > 0) {
+                --len;
+                while (len > 0 && ((unsigned char)buf[len] & 0xC0) == 0x80) {
+                    --len;
+                }
+                buf[len] = '\0';
+            }
+            continue;
+        }
+        if (k >= UI_TEXT_BYTE) {
+            if (len + 1 < UI_PATH_MAX) {
+                buf[len++] = (char)(k - UI_TEXT_BYTE);
+                buf[len] = '\0';
+            }
+            continue;
+        }
+        if (k >= 32 && k < 127 && len + 1 < UI_PATH_MAX) {
+            buf[len++] = (char)k;
+            buf[len] = '\0';
+        }
+    }
+}
+
+/* kind：0 转换 1 播放 */
+static int ui_cfg_count(int kind)
+{
+    return kind == 0 ? 7 : 5;
+}
+
+static int ui_cfg_index(int kind, int slot)
+{
+    static const int conv[7] = {CFG_INPUT,  CFG_STYLE, CFG_RATIO, CFG_FPS,
+                                CFG_QUALITY, CFG_OUTPUT, CFG_START};
+    static const int play[5] = {CFG_INPUT, CFG_STYLE, CFG_WIDTH, CFG_FPS, CFG_START};
+    return kind == 0 ? conv[slot] : play[slot];
+}
+
+static void ui_cfg_value(const Config *st, int item, char *out, size_t cap)
+{
+    char derived[UI_PATH_MAX];
+    switch (item) {
+    case CFG_INPUT:
+        snprintf(out, cap, "%s", st->input[0] ? st->input : "（未选，Enter 打开文件列表）");
+        break;
+    case CFG_OUTPUT:
+        if (st->output[0]) {
+            snprintf(out, cap, "%s", st->output);
+        } else if (st->input[0]) {
+            ui_derive_output(st->input, derived, sizeof derived);
+            snprintf(out, cap, "自动 → %s", derived);
+        } else {
+            snprintf(out, cap, "自动（输入名-ascii.mp4）");
+        }
+        break;
+    case CFG_STYLE:
+        snprintf(out, cap, "%s", ui_style_name(st->style));
+        break;
+    case CFG_RATIO:
+        snprintf(out, cap, "%s", RATIO_NAMES[st->ratio]);
+        break;
+    case CFG_FPS:
+        snprintf(out, cap, "%s", ui_fps_name(st->fps));
+        break;
+    case CFG_QUALITY:
+        snprintf(out, cap, "%s", ui_quality_name(st->quality));
+        break;
+    case CFG_WIDTH:
+        if (st->cols_want > 0) {
+            snprintf(out, cap, "%d 列", st->cols_want);
+        } else {
+            snprintf(out, cap, "自动（终端 %d 列）", terminal_columns());
+        }
+        break;
+    default:
+        snprintf(out, cap, "%s", "");
+        break;
+    }
+}
+
+static void ui_draw_config(const Config *st, int kind)
+{
+    int cols = terminal_columns();
+    int rows = terminal_rows();
+    if (cols <= 0) {
+        cols = 80;
+    }
+    if (rows <= 0) {
+        rows = 24;
+    }
+    const char *title = kind == 0 ? "视频转换" : "视频播放";
+    static const char *labels_all[CFG_ITEM_MAX] = {"输入", "风格", "比例", "帧率",
+                                                   "质量", "输出", "宽度", "开始"};
+    const int count = ui_cfg_count(kind);
+
+    StrBuf sb = {NULL, 0, 0};
+    ui_clear_screen();
+    sb_addf(&sb, "\x1b[H");
+    ui_row(&sb, 1);
+    sb_addf(&sb, UI_BOLD UI_MIKU);
+    ui_add_text(&sb, "MIKU", -1);
+    sb_addf(&sb, UI_RESET UI_DIM "  /  " UI_RESET UI_BOLD);
+    ui_add_text(&sb, title, -1);
+    sb_addf(&sb, UI_RESET);
+    ui_row(&sb, 2);
+    sb_addf(&sb, UI_DIM "────────────────────────────────" UI_RESET);
+
+    ui_hit_reset();
+    const int value_col = 12;
+    int row = 4;
+    for (int slot = 0; slot < count; ++slot, ++row) {
+        const int item = ui_cfg_index(kind, slot);
+        ui_hit_add(row);
+        const int focused = st->focus == slot;
+
+        if (item == CFG_START) {
+            ui_row(&sb, row + 1);
+            ui_hit_add(row + 1);
+            if (focused) {
+                sb_addf(&sb, UI_GOOD UI_BOLD "▶ 开始");
+            } else {
+                sb_addf(&sb, UI_DIM "▶ 开始");
+            }
+            sb_addf(&sb, UI_RESET);
+            break;
+        }
+
+        char value[UI_PATH_MAX + 40];
+        ui_cfg_value(st, item, value, sizeof value);
+
+        ui_row(&sb, row);
+        sb_addf(&sb, "%s", focused ? UI_ACCENT "▸ " : "  ");
+        sb_addf(&sb, "%s", focused ? UI_BOLD : UI_DIM);
+        ui_add_text(&sb, labels_all[item], -1);
+        sb_addf(&sb, UI_RESET);
+        for (int pad = value_col - 2 - ui_text_width(labels_all[item]); pad > 0; --pad) {
+            sb_addf(&sb, " ");
+        }
+        if (focused) {
+            sb_addf(&sb, UI_BOLD);
+        }
+        const int avail = cols - value_col - 1;
+        if (item == CFG_INPUT || item == CFG_OUTPUT) {
+            ui_add_text_tail(&sb, value, avail);
+        } else {
+            ui_add_text(&sb, value, avail);
+        }
+        sb_addf(&sb, UI_RESET);
+    }
+
+    ui_row(&sb, rows - 1);
+    sb_addf(&sb, UI_DIM);
+    ui_add_text(&sb, "↑↓ 移动  ←→ 调整  Enter 选择/确认  e 手打  Esc 返回", cols - 1);
+    sb_addf(&sb, UI_RESET);
+    if (st->status[0]) {
+        ui_row(&sb, rows);
+        sb_addf(&sb, UI_WARN);
+        ui_add_text(&sb, st->status, cols - 1);
+        sb_addf(&sb, UI_RESET);
+    }
+    ui_flush(&sb);
+    free(sb.buf);
+}
+
+static void ui_cfg_adjust(Config *st, int item, int dir)
+{
+    st->status[0] = '\0';
+    switch (item) {
+    case CFG_STYLE: st->style = !st->style; break;
+    case CFG_RATIO: st->ratio = (st->ratio + dir + RATIO_COUNT) % RATIO_COUNT; break;
+    case CFG_FPS: {
+        static const int opts[4] = {0, 24, 30, 60};
+        int idx = 0;
+        for (int i = 0; i < 4; ++i) {
+            if (opts[i] == st->fps) {
+                idx = i;
+            }
+        }
+        idx = (idx + dir + 4) % 4;
+        st->fps = opts[idx];
+        break;
+    }
+    case CFG_QUALITY: st->quality = (st->quality + dir + 5) % 5; break;
+    case CFG_WIDTH:
+        if (st->cols_want == 0) {
+            st->cols_want = dir > 0 ? MIN_ASCII_WIDTH : MAX_ASCII_WIDTH;
+        } else {
+            st->cols_want += dir * 10;
+            if (st->cols_want < MIN_ASCII_WIDTH) {
+                st->cols_want = 0;
+            }
+            if (st->cols_want > MAX_ASCII_WIDTH) {
+                st->cols_want = MAX_ASCII_WIDTH;
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+/* ---------------- 进度页与完成页 ---------------- */
+
+typedef struct {
+    ConvertOutcome *res;
+    const Config *st;
+    int width_cols;
+    int style;
+    long long done, total, out_frames;
+    double elapsed, eta;
+    double last_draw;
+    int cancelled;
+} Progress;
+
+static void ui_draw_note(const char *msg, const char *sub)
+{
+    int cols = terminal_columns();
+    if (cols <= 0) {
+        cols = 80;
+    }
+    StrBuf sb = {NULL, 0, 0};
+    ui_clear_screen();
+    sb_addf(&sb, "\x1b[H");
+    ui_row(&sb, 2);
+    sb_addf(&sb, UI_ACCENT UI_BOLD);
+    ui_add_text(&sb, msg, cols - 1);
+    sb_addf(&sb, UI_RESET);
+    if (sub) {
+        ui_row(&sb, 4);
+        sb_addf(&sb, UI_DIM);
+        ui_add_text(&sb, sub, cols - 1);
+        sb_addf(&sb, UI_RESET);
+    }
+    ui_flush(&sb);
+    free(sb.buf);
+}
+
+static void ui_draw_progress(const Progress *pg)
+{
+    int cols = terminal_columns();
+    if (cols <= 0) {
+        cols = 80;
+    }
+    const int avail = cols - 1;
+    char line[256];
+
+    StrBuf sb = {NULL, 0, 0};
+    sb_addf(&sb, "\x1b[H");
+    ui_row(&sb, 1);
+    sb_addf(&sb, UI_BOLD UI_ACCENT "转换中" UI_RESET UI_DIM "   q 取消" UI_RESET);
+
+    ui_row(&sb, 3);
+    ui_add_text_tail(&sb, pg->st->input, avail);
+    ui_row(&sb, 4);
+    sb_addf(&sb, UI_DIM "→ " UI_RESET);
+    ui_add_text_tail(&sb, pg->st->output[0] ? pg->st->output : "（自动）", avail - 2);
+
+    double frac = 0.0;
+    if (pg->total > 0) {
+        frac = (double)pg->done / (double)pg->total;
+        frac = frac < 0 ? 0 : (frac > 1 ? 1 : frac);
+    }
+    int bar_w = cols - 12;
+    bar_w = bar_w > 40 ? 40 : (bar_w < 8 ? 8 : bar_w);
+    const int filled = (int)(frac * bar_w + 0.5);
+    ui_row(&sb, 6);
+    sb_addf(&sb, UI_GOOD);
+    for (int i = 0; i < bar_w; ++i) {
+        sb_addf(&sb, "%s", i < filled ? "█" : "░");
+    }
+    sb_addf(&sb, UI_RESET " %5.1f%%", frac * 100.0);
+
+    ui_row(&sb, 7);
+    if (pg->total > 0) {
+        if (pg->eta >= 0) {
+            snprintf(line, sizeof line, "%lld / %lld 帧 · 已用 %.1f 秒 · 剩余约 %.0f 秒", pg->done,
+                     pg->total, pg->elapsed, pg->eta);
+        } else {
+            snprintf(line, sizeof line, "%lld / %lld 帧 · 已用 %.1f 秒", pg->done, pg->total,
+                     pg->elapsed);
+        }
+    } else {
+        snprintf(line, sizeof line, "%lld 帧 · 已用 %.1f 秒", pg->done, pg->elapsed);
+    }
+    ui_add_text(&sb, line, avail);
+
+    if (pg->res->prof.enc) {
+        Layout L;
+        compute_layout(&pg->res->prof, pg->width_cols, pg->res->info.width, pg->res->info.height,
+                       &L);
+        ui_row(&sb, 9);
+        sb_addf(&sb, UI_DIM);
+        snprintf(line, sizeof line, "输出 %dx%d @ %dfps · %s · %s", pg->res->prof.width,
+                 pg->res->prof.height, pg->res->prof.fps, pg->res->prof.name,
+                 pg->style == STYLE_BLOCK ? "色块" : "字符");
+        ui_add_text(&sb, line, avail);
+        sb_addf(&sb, UI_RESET);
+        ui_row(&sb, 10);
+        sb_addf(&sb, UI_DIM);
+        snprintf(line, sizeof line, "%dx%d 格 · %s%s", L.cols, L.rows,
+                 pg->res->prof.enc->codec, pg->res->prof.enc->hardware ? "（硬件）" : "（软件）");
+        ui_add_text(&sb, line, avail);
+        sb_addf(&sb, UI_RESET);
+    }
+    ui_flush(&sb);
+    free(sb.buf);
+}
+
+static void ui_progress_cb(void *ud, long long done, long long total, long long out_frames,
+                           double elapsed, double eta)
+{
+    Progress *pg = ud;
+    pg->done = done;
+    pg->total = total;
+    pg->out_frames = out_frames;
+    pg->elapsed = elapsed;
+    pg->eta = eta;
+    const double now = now_seconds();
+    if (pg->last_draw == 0.0) {
+        ui_clear_screen();
+    }
+    if (now - pg->last_draw < 0.15) {
+        return;
+    }
+    pg->last_draw = now;
+    ui_draw_progress(pg);
+}
+
+static int ui_abort_cb(void *ud)
+{
+    Progress *pg = ud;
+    for (;;) {
+        const int k = ui_key(0);
+        if (k == UI_NONE) {
+            break;
+        }
+        if (k == 'q' || k == 27 || k == 3) {
+            pg->cancelled = 1;
+        }
+    }
+    if (g_ui_stop) {
+        pg->cancelled = 1;
+    }
+    return pg->cancelled;
+}
+
+static int ui_log_open(const char *path, int *saved)
+{
+    fflush(stderr);
+    *saved = dup(STDERR_FILENO);
+    if (*saved < 0) {
+        return 0;
+    }
+    const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        close(*saved);
+        *saved = -1;
+        return 0;
+    }
+    dup2(fd, STDERR_FILENO);
+    close(fd);
+    return 1;
+}
+
+static void ui_log_close(int saved)
+{
+    if (saved < 0) {
+        return;
+    }
+    fflush(stderr);
+    dup2(saved, STDERR_FILENO);
+    close(saved);
+}
+
+static void ui_log_tail(const char *path, char *dst, size_t cap)
+{
+    dst[0] = '\0';
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return;
+    }
+    const long size = ftell(f);
+    long from = size > 600 ? size - 600 : 0;
+    from = from < 0 ? 0 : from;
+    fseek(f, from, SEEK_SET);
+    char buf[640];
+    const size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    const char *last = NULL;
+    for (char *p = buf; *p;) {
+        char *nl = strchr(p, '\n');
+        if (nl) {
+            *nl = '\0';
+        }
+        if (*p) {
+            last = p;
+        }
+        if (!nl) {
+            break;
+        }
+        p = nl + 1;
+    }
+    if (last) {
+        snprintf(dst, cap, "%s", last);
+    }
+}
+
+static int ui_convert(Config *st, int cols, ConvertOutcome *res)
+{
+    static const char *Q[5] = {"auto", "src", "high", "mid", "low"};
+    const char *quality = Q[st->quality < 0 ? 0 : (st->quality > 4 ? 0 : st->quality)];
+
+    if (st->style == STYLE_BLOCK) {
+        setenv("MIKU_NO_HW", "0", 1);
+    }
+    unsetenv("MIKU_NO_HW");
+
+    Progress pg;
+    memset(&pg, 0, sizeof pg);
+    pg.res = res;
+    pg.st = st;
+    pg.width_cols = cols;
+    pg.style = st->style;
+    pg.eta = -1;
+
+    ConvertHooks hooks;
+    memset(&hooks, 0, sizeof hooks);
+    hooks.ud = &pg;
+    hooks.on_progress = ui_progress_cb;
+    hooks.should_abort = ui_abort_cb;
+
+    ui_draw_note("正在读取视频信息、探测编码器…", "首次运行会真编几帧试每个候选，可能要几秒");
+
+    char *log = xasprintf("%s/miku-ui.log", temp_dir());
+    int saved = -1;
+    if (log) {
+        ui_log_open(log, &saved);
+    }
+    const int ok = run_convert(st->input, st->output, cols, quality, &hooks, res, &pg.cancelled,
+                               st->style, st->ratio, st->fps);
+    ui_log_close(saved);
+
+    if (!ok) {
+        if (pg.cancelled) {
+            ui_status(st, "已取消，半成品已删除");
+        } else {
+            char tail[240];
+            ui_log_tail(log ? log : "", tail, sizeof tail);
+            if (tail[0]) {
+                ui_status(st, "转换失败：%s", tail);
+            } else {
+                ui_status(st, "转换失败，详情见 %s", log ? log : "日志");
+            }
+        }
+    }
+    free(log);
+    return ok;
+}
+
+static void ui_play(Config *st, const VideoInfo *vp)
+{
+    int cols = st->cols_want;
+    if (cols == 0) {
+        const int tc = terminal_columns();
+        cols = tc > 0 ? tc : DEFAULT_ASCII_WIDTH;
+        cols = cols < MIN_ASCII_WIDTH ? MIN_ASCII_WIDTH
+                                      : (cols > MAX_ASCII_WIDTH ? MAX_ASCII_WIDTH : cols);
+    }
+    int fps = st->fps > 0 ? st->fps : (int)lround((double)vp->fps_num / vp->fps_den);
+    const int src = (int)lround((double)vp->fps_num / vp->fps_den);
+    if (fps > src) {
+        fps = src;
+    }
+    fps = fps < 1 ? 1 : (fps > 60 ? 60 : fps);
+
+    ui_leave();
+    play_terminal(st->input, cols, vp, fps, !st->mute, st->style);
+    ui_enter();
+    ui_status(st, "播放结束");
+}
+
+static void ui_draw_done(const Config *st, const ConvertOutcome *res, double elapsed)
+{
+    int cols = terminal_columns();
+    if (cols <= 0) {
+        cols = 80;
+    }
+    struct stat stt;
+    double mb = 0.0;
+    if (stat(st->output, &stt) == 0) {
+        mb = (double)stt.st_size / (1024.0 * 1024.0);
+    }
+
+    StrBuf sb = {NULL, 0, 0};
+    ui_clear_screen();
+    sb_addf(&sb, "\x1b[H");
+    ui_row(&sb, 2);
+    sb_addf(&sb, UI_GOOD UI_BOLD "转换完成" UI_RESET);
+    ui_row(&sb, 4);
+    sb_addf(&sb, UI_DIM "输出  " UI_RESET);
+    ui_add_text_tail(&sb, st->output, cols - 8);
+    ui_row(&sb, 5);
+    char line[200];
+    snprintf(line, sizeof line, "%.1f MB · 耗时 %.1f 秒", mb, elapsed);
+    sb_addf(&sb, UI_DIM);
+    ui_add_text(&sb, line, cols - 1);
+    ui_row(&sb, 6);
+    snprintf(line, sizeof line, "%dx%d @ %dfps · %s · %s", res->prof.width, res->prof.height,
+             res->prof.fps, res->prof.enc->codec,
+             st->style == STYLE_BLOCK ? "色块" : "字符");
+    ui_add_text(&sb, line, cols - 1);
+    sb_addf(&sb, UI_RESET);
+    ui_row(&sb, 8);
+    sb_addf(&sb, UI_DIM);
+    ui_add_text(&sb, "p 在终端播放   其它键返回    q 退出", cols - 1);
+    sb_addf(&sb, UI_RESET);
+    ui_flush(&sb);
+    free(sb.buf);
+}
+
+/* 返回 0 = 回配置页，1 = 播放，2 = 退出 */
+static int ui_wait_done(const Config *st, const ConvertOutcome *res, double elapsed)
+{
+    ui_draw_done(st, res, elapsed);
+    for (;;) {
+        const int k = ui_key(-1);
+        if (k == UI_NONE || g_ui_stop) {
+            return 2;
+        }
+        if (k == 'q' || k == 3 || k == 27) {
+            return 2;
+        }
+        if (k == 'p') {
+            return 1;
+        }
+        return 0;
+    }
+}
+
+/* 真正开始时走的管线；返回 2 表示要退出程序 */
+static int ui_start(Config *st, int kind)
+{
+    if (!st->input[0]) {
+        ui_status(st, "先填输入文件路径（Enter 编辑）");
+        return 0;
+    }
+    if (access(st->input, R_OK) != 0) {
+        ui_status(st, "读不到输入文件: %s", st->input);
+        return 0;
+    }
+
+    int cols = 0;
+    if (kind == 0) {
+        if (!st->output[0]) {
+            ui_derive_output(st->input, st->output, sizeof st->output);
+        }
+        if (strcmp(st->input, st->output) == 0) {
+            ui_status(st, "输出不能和输入同名");
+            return 0;
+        }
+        const int tc = terminal_columns();
+        cols = tc > 0 ? tc : DEFAULT_ASCII_WIDTH;
+        cols = cols < MIN_ASCII_WIDTH ? MIN_ASCII_WIDTH
+                                      : (cols > MAX_ASCII_WIDTH ? MAX_ASCII_WIDTH : cols);
+    }
+
+    ConvertOutcome res;
+    memset(&res, 0, sizeof res);
+
+    if (kind == 1) { /* 播放：读完信息直接播 */
+        ui_draw_note("正在读取视频信息…", NULL);
+        if (!probe_video(st->input, &res.info)) {
+            ui_status(st, "读不到视频信息: %s", st->input);
+            return 0;
+        }
+        ui_play(st, &res.info);
+        return 0;
+    }
+
+    const double t0 = now_seconds();
+    if (!ui_convert(st, cols, &res)) {
+        return 0;
+    }
+    const double elapsed = now_seconds() - t0;
+
+    const int choice = ui_wait_done(st, &res, elapsed);
+    if (choice == 1) {
+        ui_play(st, &res.info);
+        return 0;
+    }
+    return choice == 2 ? 2 : 0;
+}
+
+static int ui_config_screen(Config *st, int kind)
+{
+    st->focus = 0;
+    st->status[0] = '\0';
+
+    for (;;) {
+        ui_draw_config(st, kind);
+        int k = ui_key(-1);
+        if (k == UI_NONE) {
+            continue;
+        }
+        if (k == 'q' || k == 27 || k == 3) {
+            return 0;
+        }
+        const int count = ui_cfg_count(kind);
+
+        if (k == UI_CLICK) {
+            const int hit = ui_hit_index(g_ui_my);
+            for (int slot = 0; slot < count; ++slot) {
+                if (hit >= 0 && slot == hit) {
+                    st->focus = slot;
+                }
+            }
+            if (st->focus < count - 1) {
+                continue;
+            }
+            k = '\r'; /* 点在「开始」上就当回车 */
+        }
+        if (k == UI_UP || k == 'k') {
+            st->focus = (st->focus + count - 1) % count;
+            continue;
+        }
+        if (k == UI_DOWN || k == 'j' || k == '\t' || k == UI_WHEEL_DOWN || k == UI_WHEEL_UP) {
+            const int dir = (k == UI_UP || k == UI_WHEEL_UP) ? -1 : 1;
+            st->focus = (st->focus + dir + count) % count;
+            continue;
+        }
+        const int item = ui_cfg_index(kind, st->focus);
+        if (k == 'e' && item == CFG_INPUT) {
+            ui_edit_field(st, CFG_INPUT, "输入视频路径（手打）");
+            continue;
+        }
+        if (k == UI_LEFT || k == UI_RIGHT) {
+            ui_cfg_adjust(st, item, k == UI_LEFT ? -1 : 1);
+            continue;
+        }
+        if (k == '\r' || k == '\n') {
+            if (item == CFG_START) {
+                if (ui_start(st, kind) == 2) {
+                    return 1;
+                }
+            } else if (item == CFG_INPUT) {
+                char picked[UI_PATH_MAX];
+                if (ui_pick_file(picked, sizeof picked, st->input[0] ? st->input : ".")) {
+                    snprintf(st->input, sizeof st->input, "%s", picked);
+                }
+            } else if (item == CFG_OUTPUT) {
+                ui_edit_field(st, CFG_OUTPUT, "输出视频路径（留空 = 自动）");
+            } else {
+                ui_cfg_adjust(st, item, 1);
+            }
+        }
+    }
+}
+
+static int tui_main(void)
+{
+    Config st;
+    memset(&st, 0, sizeof st);
+    st.style = STYLE_CHAR;
+    st.quality = 1; /* 默认原画分辨率；要降级再选 auto/high/mid/low */
+    if (access("miku.mp4", R_OK) == 0) {
+        snprintf(st.input, sizeof st.input, "miku.mp4");
+    }
+    srand((unsigned)time(NULL) ^ (unsigned)getpid());
+
+    atexit(ui_leave);
+    ui_enter();
+
+    for (;;) {
+        const int choice = ui_home();
+        if (choice == 2 || g_ui_stop) {
+            break;
+        }
+        if (ui_config_screen(&st, choice) == 1) {
+            break;
+        }
+    }
+
+    ui_leave();
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
+    /* 不带参数、又确实在终端里：进界面。带参数或重定向都走原来的命令行 */
+    if (argc == 1 && isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
+        return tui_main();
+    }
+
     if (argc < 3) {
         printf("用法: %s [--play] <input-video> <output-video> [ASCII宽度|auto] [质量|auto]\n", argv[0]);
         printf("示例: %s miku.mp4 ascii.mp4\n", argv[0]);
@@ -2156,11 +4000,12 @@ int main(int argc, char *argv[])
         printf("模式: 默认只转码；--play 转完播放；--play-only 不转码直接播放\n");
         printf("      --play 时省略输出文件名 = 用临时文件，播完（或中断）自动删除\n");
         printf("      --mute 播放时不出声（默认有音轨就会用 mpv/ffplay 放声音）\n");
+        printf("界面: 不带任何参数直接运行 %s 会打开终端界面（只在终端里有效）\n", argv[0]);
         return 1;
     }
 
     /* 先把 --flag 摘出来，其余按位置解析 */
-    int want_play = 0, play_only = 0, mute = 0;
+    int want_play = 0, play_only = 0, mute = 0, style = STYLE_CHAR;
     const char *pos[4] = {NULL, NULL, NULL, NULL};
     int npos = 0;
     for (int i = 1; i < argc; ++i) {
@@ -2171,6 +4016,8 @@ int main(int argc, char *argv[])
             play_only = 1;
         } else if (strcmp(argv[i], "--mute") == 0) {
             mute = 1;
+        } else if (strcmp(argv[i], "--block") == 0 || strcmp(argv[i], "--style=block") == 0) {
+            style = STYLE_BLOCK;
         } else if (npos < 4) {
             pos[npos++] = argv[i];
         }
@@ -2291,7 +4138,7 @@ int main(int argc, char *argv[])
     signal(SIGPIPE, SIG_IGN);
 
     printf("========================================\n");
-    printf("原彩ASCII视频转换器 v4.5 (C17)\n");
+    printf("原彩ASCII视频转换器 v5.0 (C17)\n");
     printf("========================================\n");
 
     if (term_cols > 0) {
@@ -2303,70 +4150,28 @@ int main(int argc, char *argv[])
         }
     }
 
-    VideoInfo info;
-    if (!probe_video(input, &info)) {
-        fprintf(stderr, "无法读取视频信息: %s\n", input);
-        return 1;
-    }
-    const double src_fps = (double)info.fps_num / info.fps_den;
-    printf("视频信息: %dx%d, %.3ffps, %ld帧\n", info.width, info.height, src_fps, info.total_frames);
+    ConvertOutcome res;
+    memset(&res, 0, sizeof res);
 
     if (play_only) {
+        if (!probe_video(input, &res.info)) {
+            fprintf(stderr, "无法读取视频信息: %s\n", input);
+            return 1;
+        }
+        const double pfps = (double)res.info.fps_num / res.info.fps_den;
+        printf("视频信息: %dx%d, %.3ffps, %ld帧\n", res.info.width, res.info.height, pfps,
+               res.info.total_frames);
         printf("模式: 不转码，直接从源播放\n");
+    } else if (!run_convert(input, output, cols, quality, NULL, &res, NULL, style, 0, 0)) {
+        if (output_is_temp) {
+            remove(output);
+        }
+        fprintf(stderr, "========================================\n");
+        fprintf(stderr, "转换失败!\n");
+        fprintf(stderr, "========================================\n");
+        free(temp_out);
+        return 1;
     } else {
-        Profile prof;
-        memset(&prof, 0, sizeof prof);
-        if (!choose_profile(quality, (int)lround(src_fps), &prof)) {
-            fprintf(stderr, "错误: 没有可用的视频编码器，或质量参数无效\n");
-            return 1;
-        }
-        printf("性能诊断: %d 核 / %ld MB 内存 / 预算 %.2f CPU秒每视频秒\n", cpu_cores(),
-               total_memory_mb(), cpu_cores() * CPU_BUDGET_RATIO);
-
-        int ok = convert(input, output, cols, &prof, &info);
-
-        /* 硬件编码器可能"成功"却漏帧，抽查最后一秒；不合格就当失败走软件重试 */
-        if (ok && prof.enc->hardware && !output_tail_ok(output, &prof)) {
-            fprintf(stderr, "硬件编码的输出缺帧，改用软件编码重做一次\n");
-            ok = 0;
-        }
-
-        /* 硬件编码器在真机上仍可能中途失败（驱动/会话被占用），自动退回软件再试一次 */
-        if (!ok && prof.enc->hardware) {
-            fprintf(stderr, "硬件编码 %s 失败，改用软件编码重试一次\n", prof.enc->codec);
-            const EncoderCand *sw = NULL;
-            for (int i = 0; i < ENCODER_COUNT && !sw; ++i) {
-                if (ENCODERS[i].hardware || !encoder_listed(i)) {
-                    continue;
-                }
-                if (encoder_works(&ENCODERS[i], prof.width, prof.height, prof.fps)) {
-                    sw = &ENCODERS[i];
-                }
-            }
-            if (sw) {
-                prof.enc = sw;
-                remove(output);
-                ok = convert(input, output, cols, &prof, &info);
-            }
-        }
-
-        if (!ok) {
-            if (output_is_temp) {
-                remove(output);
-            }
-            fprintf(stderr, "========================================\n");
-            fprintf(stderr, "转换失败!\n");
-            fprintf(stderr, "========================================\n");
-            free(temp_out);
-            return 1;
-        }
-
-        /* libx264 已经通过 -x264-params 写全了色标，其它编码器补一次 */
-        if (strcmp(prof.enc->codec, "libx264") != 0) {
-            if (stamp_bt709(output)) {
-                printf("色标: 已补写 BT.709（该编码器本身不写 color_primaries）\n");
-            }
-        }
         printf("========================================\n");
         printf("成功创建彩色ASCII视频!\n");
         printf("输出文件: %s%s\n", output, output_is_temp ? "（临时，播完自动删除）" : "");
@@ -2375,11 +4180,12 @@ int main(int argc, char *argv[])
 
     if (want_play) {
         /* 播放不需要编码，直接按终端网格重走一遍源；帧率封到 24，终端刷不过来 */
+        const double src_fps = (double)res.info.fps_num / res.info.fps_den;
         int play_fps = (int)lround(src_fps);
         play_fps = play_fps < 1 ? 1 : (play_fps > 24 ? 24 : play_fps);
         printf("在终端播放（按 q 退出%s）...\n", mute ? "，静音" : "");
         fflush(stdout);
-        play_terminal(input, cols, &info, play_fps, !mute);
+        play_terminal(input, cols, &res.info, play_fps, !mute, style);
 
         if (output_is_temp) {
             if (remove(output) == 0) {

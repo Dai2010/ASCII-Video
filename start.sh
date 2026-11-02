@@ -195,16 +195,8 @@ main() {
         exec ./miku "$@"
     fi
 
-    if [ -f miku.mp4 ]; then
-        ./miku miku.mp4 ascii.mp4 320
-        print_info "想直接在终端看效果：./start.sh --play miku.mp4 160"
-        exit 0
-    fi
-
-    print_warning "没有参数，也没找到 miku.mp4"
-    echo
-    ./miku
-    exit 1
+    # 没有参数：直接进终端界面（界面里能选文件、选风格、选比例与帧率）
+    exec ./miku
 }
 
 main "$@"
