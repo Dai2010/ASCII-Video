@@ -60,10 +60,7 @@
 
 /* ---------------------------- 常量 ---------------------------- */
 
-/* 强制输出规格 */
-#define OUT_WIDTH 2560  /* 2K (QHD) */
-#define OUT_HEIGHT 1440
-#define OUT_FPS 60
+/* 输出规格不再写死：见下面的 Tier 档位表，自动降级时按高→低依次尝试 */
 
 /* ASCII宽度范围（每行字符数） */
 #define DEFAULT_ASCII_WIDTH 320
@@ -95,6 +92,78 @@
  * 想要更小的文件可改成 fast / medium / slow（越慢越小，耗时也越长） */
 #define X264_PRESET "veryfast"
 #define X264_CRF "19"         /* 越小画质越高、文件越大（常用范围 16-23） */
+
+/* 输出档位：全部 16:9，宽高都是 16 的倍数（yuv420p 与硬件编码器都要求偶数，
+ * 硬件编码器普遍还要求对齐到 16）。自动降级时按 high -> mid -> low 往下选 */
+typedef struct {
+    const char *name;
+    int width;
+    int height;
+    int fps;
+    long min_mem_mb; /* 低于这个物理内存就不再选该档 */
+} Tier;
+
+#define TIER_COUNT 3
+
+static const Tier TIERS[TIER_COUNT] = {
+    {"high", 2560, 1440, 60, 1500},
+    {"mid", 1920, 1080, 30, 900},
+    {"low", 1280, 720, 24, 500},
+};
+
+/* 自动降级的成本模型：每秒输出视频要花多少 CPU 秒 = 输出像素率(Mpx/s) * 系数。
+ * 系数来自实测（ASCII 画面边缘多，x264 veryfast crf19 在 2K/1080p/720p 上
+ * 分别是 0.087 / 0.091 / 0.103 CPU 秒每 Mpx，取偏保守的 0.10） */
+#define SW_CPU_PER_MPX 0.10
+#define HW_CPU_PER_MPX 0.003
+#define RENDER_CPU_PER_MPX 0.003
+#define CPU_BUDGET_RATIO 1.4 /* 允许每秒视频最多占用 1.4*核数 个 CPU 秒 */
+
+/* 硬件编码器的码率系数（硬件编码器普遍没有 CRF，只能按码率控）：
+ * 实测 2K60 crf19 约 21 Mbps，折合约 0.10 bit/像素；但硬件编码的量化更粗，
+ * 0.10 时亮度与色相都会比 crf19 略偏（YAVG -6%、HUEAVG -5%），
+ * 所以默认给到 0.18，用编译时的 -DHW_BITS_PER_PIXEL= 可再调 */
+#ifndef HW_BITS_PER_PIXEL
+#define HW_BITS_PER_PIXEL 0.18
+#endif
+#define HW_MIN_KBPS 1500
+#define HW_MAX_KBPS 40000
+
+/* 编码器候选，按顺序试，第一个"真跑通"的用：
+ *   fixed       软件编码器的固定参数；NULL 表示走码率（硬件编码器）
+ *   pipe_filter 追加在 scale/format 之后的滤镜（VAAPI 需要 hwupload）
+ *   input_prefix 放在 -i 之前的参数（VAAPI 设备）
+ * 顺序刻意把各平台的硬件编码器排在前面，软件 x264 兜底，mpeg4 最后 */
+typedef struct {
+    const char *codec;
+    const char *fixed;
+    const char *pipe_filter;
+    const char *input_prefix;
+    int hardware;
+} EncoderCand;
+
+static const EncoderCand ENCODERS[] = {
+    {"h264_videotoolbox", NULL, NULL, NULL, 1},                                    /* macOS */
+    {"h264_nvenc", NULL, NULL, NULL, 1},                                           /* NVIDIA */
+    {"h264_qsv", NULL, NULL, NULL, 1},                                             /* Intel */
+    {"h264_vaapi", NULL, ",format=nv12,hwupload", "-vaapi_device /dev/dri/renderD128", 1}, /* AMD/Intel */
+    {"h264_mediacodec", NULL, NULL, NULL, 1},                                      /* Android */
+    {"libx264", "-preset " X264_PRESET " -crf " X264_CRF
+                " -x264-params colorprim=bt709:transfer=bt709:colormatrix=bt709",
+     NULL, NULL, 0},
+    {"mpeg4", "-q:v 2", NULL, NULL, 0},
+};
+
+#define ENCODER_COUNT ((int)(sizeof(ENCODERS) / sizeof(ENCODERS[0])))
+
+/* 一次转换实际要用的规格 */
+typedef struct {
+    char name[32];   /* 档位名，或用户给的 WxH@FPS */
+    int width;
+    int height;
+    int fps;
+    const EncoderCand *enc;
+} Profile;
 
 /* 内嵌字体参数 */
 #define FONT_FIRST_CHAR 32
@@ -656,6 +725,379 @@ static int command_exists(const char *name)
     return ok;
 }
 
+/* ---------------------------- 编码能力探测 ---------------------------- */
+
+/*
+ * 硬件编码器（mediacodec / vaapi / videotoolbox 等）写不出 color_primaries 与
+ * color_transfer，播放器会自己猜，猜成 smpte170m 就会让颜色发闷 —— 正是 v4.1
+ * 修饱和度时最怕的那种偏差。用一次流复制重封装把 BT.709 三件套补齐。
+ * 返回 1 表示补写成功。
+ */
+static int stamp_bt709(const char *output)
+{
+    const char *dot = strrchr(output, '.');
+    char *tmp = (dot && dot != output) ? xasprintf("%.*s_tag%s", (int)(dot - output), output, dot)
+                                       : xasprintf("%s_tag.mp4", output);
+    if (!tmp) {
+        return 0;
+    }
+    char *qout = shell_quote(output);
+    char *qtmp = shell_quote(tmp);
+    int done = 0;
+    if (qout && qtmp) {
+        char *cmd = xasprintf("ffmpeg -v error -y -i %s -map 0 -c copy "
+                              "-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv "
+                              "-movflags +faststart %s 2>/dev/null",
+                              qout, qtmp);
+        if (cmd) {
+            if (exit_ok(system(cmd))) {
+                if (rename(tmp, output) == 0) {
+                    done = 1;
+                }
+            }
+            free(cmd);
+        }
+    }
+    if (!done) {
+        remove(tmp);
+    }
+    free(qout);
+    free(qtmp);
+    free(tmp);
+    return done;
+}
+
+/* 物理内存（MB）；读不到返回 0 */
+static long total_memory_mb(void)
+{
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) {
+        return 0;
+    }
+    long kb = 0;
+    char line[128];
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "MemTotal: %ld kB", &kb) == 1) {
+            break;
+        }
+    }
+    fclose(f);
+    return kb > 0 ? kb / 1024 : 0;
+}
+
+/* 可用的核数；设 MIKU_CORES=N 可手工压低调度（省电、共享主机、老旧设备） */
+static int cpu_cores(void)
+{
+    const char *env = getenv("MIKU_CORES");
+    if (env && *env) {
+        const int n = atoi(env);
+        if (n > 0) {
+            return n;
+        }
+    }
+    const long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
+}
+
+/* 该编码器是否被当前 ffmpeg 编译进来。列不出来就不必再花一次探测 */
+static int encoder_listed_by_name(const char *codec)
+{
+    FILE *p = popen("ffmpeg -hide_banner -encoders 2>/dev/null", "r");
+    if (!p) {
+        return 0;
+    }
+    const size_t n = strlen(codec);
+    char line[256];
+    int found = 0;
+    while (!found && fgets(line, sizeof line, p)) {
+        for (const char *hit = strstr(line, codec); hit; hit = strstr(hit + 1, codec)) {
+            const int left_ok = hit == line || hit[-1] == ' ' || hit[-1] == '\t';
+            const char next = hit[n];
+            if (left_ok && (next == ' ' || next == '\t')) {
+                found = 1;
+                break;
+            }
+        }
+    }
+    pclose(p);
+    return found;
+}
+
+static int encoder_listed(int idx)
+{
+    static signed char cache[ENCODER_COUNT]; /* 0 = 还没查过 */
+    if (cache[idx] == 0) {
+        cache[idx] = encoder_listed_by_name(ENCODERS[idx].codec) ? 1 : -1;
+    }
+    return cache[idx] > 0;
+}
+
+/* 硬件编码器只能按码率控，按输出像素率折算 */
+static long hw_bitrate_kbps(int w, int h, int fps)
+{
+    const double px_per_sec = (double)w * h * fps;
+    long kbps = (long)(px_per_sec * HW_BITS_PER_PIXEL / 1000.0);
+    if (kbps < HW_MIN_KBPS) {
+        kbps = HW_MIN_KBPS;
+    }
+    if (kbps > HW_MAX_KBPS) {
+        kbps = HW_MAX_KBPS;
+    }
+    return kbps;
+}
+
+/*
+ * 真编 24 帧来判断编码器在这个尺寸上是否可用，用的是和正式转换相同的滤镜链，
+ * 写完再把帧数数回来。
+ *   - 只看 -encoders 列表不够：h264_vulkan 会列出来但滤镜协商就失败；
+ *   - 只看退出码也不够：某些设备/版本的 mediacodec 会正常退出，却把帧编码成
+ *     解不出来的包（实测这一版 ffmpeg 上 96 个包只能解出 73 帧），
+ *     出来的片子会缺帧甚至短一截。所以必须校验解码帧数。
+ */
+static const char *temp_dir(void)
+{
+    const char *t = getenv("TMPDIR");
+    if (t && *t) {
+        return t;
+    }
+    t = getenv("TMP");
+    return (t && *t) ? t : "/tmp";
+}
+
+/* 数出文件里能真正解码的视频帧数；失败返回 -1 */
+static int count_decodable_frames(const char *path)
+{
+    char *q = shell_quote(path);
+    if (!q) {
+        return -1;
+    }
+    char *cmd = xasprintf("ffprobe -v error -count_frames -select_streams v:0 "
+                          "-show_entries stream=nb_read_frames -of csv=p=0 %s 2>/dev/null",
+                          q);
+    free(q);
+    if (!cmd) {
+        return -1;
+    }
+    FILE *p = popen(cmd, "r");
+    free(cmd);
+    if (!p) {
+        return -1;
+    }
+    int frames = -1;
+    if (fscanf(p, "%d", &frames) != 1) {
+        frames = -1;
+    }
+    pclose(p);
+    return frames;
+}
+
+/* 探测用帧数：够短不拖启动，又足以暴露"吞尾部/坏包"的问题
+ * （实测坏掉的 mediacodec 无论喂多少帧都只交出 1 帧） */
+#define PROBE_FRAMES 8
+
+static int encoder_works(const EncoderCand *c, int w, int h, int fps)
+{
+    char *args = c->fixed ? xasprintf("%s", c->fixed)
+                          : xasprintf("-b:v %ldk", hw_bitrate_kbps(w, h, fps));
+    if (!args) {
+        return 0;
+    }
+    char *out = xasprintf("%s/miku-probe-%ld.mp4", temp_dir(), (long)getpid());
+    if (!out) {
+        free(args);
+        return 0;
+    }
+    remove(out);
+    char *cmd = xasprintf("ffmpeg -v error -y %s -f lavfi -i 'color=c=black:s=%dx%d:r=%d' "
+                          "-frames:v %d -vf 'scale=out_color_matrix=bt709:out_range=tv,format=yuv420p%s' "
+                          "-c:v %s %s %s 2>/dev/null",
+                          c->input_prefix ? c->input_prefix : "", w, h, fps, PROBE_FRAMES,
+                          c->pipe_filter ? c->pipe_filter : "", c->codec, args, out);
+    free(args);
+    int ok = 0;
+    if (cmd) {
+        ok = exit_ok(system(cmd)) && count_decodable_frames(out) >= PROBE_FRAMES;
+        free(cmd);
+    }
+    remove(out);
+    free(out);
+    return ok;
+}
+
+/* 按候选表顺序找第一个在本机该尺寸下真能用的编码器。
+ * 设 MIKU_NO_HW=1 可跳过所有硬件编码器（驱动有问题时的逃生口） */
+static const EncoderCand *pick_encoder(int w, int h, int fps)
+{
+    const char *no_hw = getenv("MIKU_NO_HW");
+    const int skip_hw = no_hw && *no_hw && strcmp(no_hw, "0") != 0;
+    for (int i = 0; i < ENCODER_COUNT; ++i) {
+        if (skip_hw && ENCODERS[i].hardware) {
+            continue;
+        }
+        if (!encoder_listed(i)) {
+            continue;
+        }
+        if (encoder_works(&ENCODERS[i], w, h, fps)) {
+            return &ENCODERS[i];
+        }
+    }
+    return NULL;
+}
+
+/* 每秒输出视频预计要占几个 CPU 秒 */
+static double profile_cpu(const Profile *p)
+{
+    const double mpx = (double)p->width * p->height * p->fps / 1e6;
+    return mpx * (p->enc->hardware ? HW_CPU_PER_MPX : SW_CPU_PER_MPX) + mpx * RENDER_CPU_PER_MPX;
+}
+
+/* 收尾抽查：解出最后 2 秒，帧数至少要有一秒的量。
+ * 硬件编码器在个别设备上会漏帧，探测通过也可能在长片中途开始丢，所以再兜一道 */
+static int output_tail_ok(const char *output, const Profile *p)
+{
+    char *q = shell_quote(output);
+    if (!q) {
+        return 0;
+    }
+    char *cmd = xasprintf("ffprobe -v error -read_intervals -2%% -count_frames -select_streams v:0 "
+                          "-show_entries stream=nb_read_frames -of csv=p=0 %s 2>/dev/null",
+                          q);
+    free(q);
+    if (!cmd) {
+        return 0;
+    }
+    FILE *f = popen(cmd, "r");
+    free(cmd);
+    if (!f) {
+        return 0;
+    }
+    int frames = -1;
+    if (fscanf(f, "%d", &frames) != 1) {
+        frames = -1;
+    }
+    pclose(f);
+    return frames >= p->fps;
+}
+
+/* 解析 "1920x1080" / "1920x1080@30"；fps 省略时返回 0 表示跟着源帧率走 */
+static int parse_custom_size(const char *s, int *w, int *h, int *fps)
+{
+    int ww = 0, hh = 0, ff = 0;
+    const int n = sscanf(s, "%dx%d@%d", &ww, &hh, &ff);
+    if (n < 2) {
+        return 0;
+    }
+    if (n < 3) {
+        ff = 0;
+    }
+    if (ww < 256 || hh < 256 || ww > 7680 || hh > 4320) {
+        return 0;
+    }
+    if ((ww & 1) != 0 || (hh & 1) != 0) { /* yuv420p 与硬件编码器都要求偶数 */
+        return 0;
+    }
+    if (n >= 3 && (ff < 1 || ff > 240)) {
+        return 0;
+    }
+    *w = ww;
+    *h = hh;
+    *fps = ff;
+    return 1;
+}
+
+/*
+ * 选档位：
+ *   quality 为 "auto" 时按 高→低 找第一个「有可用编码器 + 成本进预算 + 内存够」的档；
+ *   给了档位名或 WxH[@fps] 就按用户指定的来（仍然会挑可用编码器）。
+ * 输出帧率不超过源帧率 —— 源是 24fps 时补到 60fps 只是白算，画面不会更流畅。
+ */
+static int choose_profile(const char *quality, int src_fps, Profile *p)
+{
+    const char *q = (quality && *quality) ? quality : "auto";
+    int w = 0, h = 0, want_fps = 0;
+    const int cores = cpu_cores();
+    const long mem_mb = total_memory_mb();
+    const double budget = (double)cores * CPU_BUDGET_RATIO;
+
+    if (parse_custom_size(q, &w, &h, &want_fps)) {
+        if (want_fps > 0) {
+            snprintf(p->name, sizeof p->name, "%dx%d@%d", w, h, want_fps);
+        } else {
+            snprintf(p->name, sizeof p->name, "%dx%d", w, h);
+        }
+    } else {
+        int tier = -1;
+        for (int i = 0; i < TIER_COUNT; ++i) {
+            if (strcmp(q, TIERS[i].name) == 0) {
+                tier = i;
+            }
+        }
+        if (tier < 0 && strcmp(q, "auto") != 0) {
+            return 0; /* 非法的档位名 */
+        }
+        if (tier >= 0) {
+            w = TIERS[tier].width;
+            h = TIERS[tier].height;
+            want_fps = TIERS[tier].fps;
+            snprintf(p->name, sizeof p->name, "%s", TIERS[tier].name);
+        } else {
+            /* auto：逐个档位试，第一个「编码器可用且算得过来」的就用；
+             * 都不进预算时取最低那档能跑的（别退到最高档去） */
+            const EncoderCand *fallback = NULL;
+            int fb_w = 0, fb_h = 0, fb_fps = 0, fb_tier = 0;
+            for (int i = 0; i < TIER_COUNT; ++i) {
+                const EncoderCand *enc = pick_encoder(TIERS[i].width, TIERS[i].height, TIERS[i].fps);
+                if (!enc) {
+                    continue;
+                }
+                const int fps = src_fps > 0 && src_fps < TIERS[i].fps ? src_fps : TIERS[i].fps;
+                Profile tmp;
+                snprintf(tmp.name, sizeof tmp.name, "%s", TIERS[i].name);
+                tmp.width = TIERS[i].width;
+                tmp.height = TIERS[i].height;
+                tmp.fps = fps;
+                tmp.enc = enc;
+                fallback = enc;
+                fb_w = tmp.width;
+                fb_h = tmp.height;
+                fb_fps = fps;
+                fb_tier = i;
+                if (mem_mb > 0 && mem_mb < TIERS[i].min_mem_mb) {
+                    continue;
+                }
+                if (profile_cpu(&tmp) <= budget) {
+                    *p = tmp;
+                    return 1;
+                }
+            }
+            if (!fallback) {
+                return 0;
+            }
+            w = fb_w;
+            h = fb_h;
+            want_fps = fb_fps;
+            snprintf(p->name, sizeof p->name, "%s", TIERS[fb_tier].name);
+        }
+    }
+
+    if (src_fps > 0 && (want_fps <= 0 || src_fps < want_fps)) {
+        want_fps = src_fps;
+    }
+    if (want_fps < 1) {
+        want_fps = TIERS[TIER_COUNT - 1].fps;
+    }
+
+    const EncoderCand *enc = pick_encoder(w, h, want_fps);
+    if (!enc) {
+        return 0;
+    }
+    p->width = w;
+    p->height = h;
+    p->fps = want_fps;
+    p->enc = enc;
+    return 1;
+}
+
 /* ---------------------------- 字形图集 ---------------------------- */
 
 /*
@@ -1016,22 +1458,22 @@ static double now_seconds(void)
     return (double)ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-/* ASCII 网格在 2K 画布中的布局 */
+/* ASCII 网格在输出画布中的布局 */
 typedef struct {
     int cols, rows;     /* 网格的字符列数、行数 */
     int cell_w, cell_h; /* 每个字符的像素大小 */
     int off_x, off_y;   /* 网格左上角在画布中的位置（居中，取偶数） */
 } Layout;
 
-static void compute_layout(int req_cols, int video_w, int video_h, Layout *L)
+static void compute_layout(const Profile *p, int req_cols, int video_w, int video_h, Layout *L)
 {
     /* 字符宽度 = 画布宽度 / 列数，取偶数；高度是宽度的2倍（字符格子是 1:2 的） */
-    int cell_w = (OUT_WIDTH / req_cols) & ~1;
+    int cell_w = (p->width / req_cols) & ~1;
     cell_w = cell_w < MIN_CELL_WIDTH ? MIN_CELL_WIDTH : (cell_w > MAX_CELL_WIDTH ? MAX_CELL_WIDTH : cell_w);
     const int cell_h = cell_w * 2;
 
-    const int max_cols = OUT_WIDTH / cell_w;
-    const int max_rows = OUT_HEIGHT / cell_h;
+    const int max_cols = p->width / cell_w;
+    const int max_rows = p->height / cell_h;
 
     int cols = req_cols > max_cols ? max_cols : req_cols;
     /* 行数 = 列数 * 视频高宽比 * (cell_w / cell_h) */
@@ -1049,11 +1491,12 @@ static void compute_layout(int req_cols, int video_w, int video_h, Layout *L)
     L->rows = rows;
     L->cell_w = cell_w;
     L->cell_h = cell_h;
-    L->off_x = ((OUT_WIDTH - cols * cell_w) / 2) & ~1;
-    L->off_y = ((OUT_HEIGHT - rows * cell_h) / 2) & ~1;
+    L->off_x = ((p->width - cols * cell_w) / 2) & ~1;
+    L->off_y = ((p->height - rows * cell_h) / 2) & ~1;
 }
 
-static int convert(const char *input, const char *output, int req_cols)
+static int convert(const char *input, const char *output, int req_cols, const Profile *p,
+                   const VideoInfo *vp)
 {
     int ret = 0;
     GlyphAtlas atlas;
@@ -1068,26 +1511,25 @@ static int convert(const char *input, const char *output, int req_cols)
         return 0;
     }
 
-    /* 步骤2：读取视频信息 */
-    VideoInfo info;
-    if (!probe_video(input, &info)) {
-        fprintf(stderr, "无法读取视频信息: %s\n", input);
-        return 0;
-    }
+    /* 步骤2：视频信息已经在入口处读过一次，这里直接用 */
+    const VideoInfo info = *vp;
     const double src_fps = (double)info.fps_num / info.fps_den;
-    printf("视频信息: %dx%d, %.3ffps, %ld帧\n", info.width, info.height, src_fps, info.total_frames);
 
     /* 步骤3：计算字符大小和网格布局 */
     Layout L;
-    compute_layout(req_cols, info.width, info.height, &L);
+    compute_layout(p, req_cols, info.width, info.height, &L);
 
-    printf("输出规格: %dx%d @ %dfps（强制）\n", OUT_WIDTH, OUT_HEIGHT, OUT_FPS);
+    printf("输出规格: %dx%d @ %dfps（档位 %s，%s编码）\n", p->width, p->height, p->fps,
+           p->name, p->enc->hardware ? "硬件" : "软件");
     printf("ASCII网格: %dx%d 字符，每个字符 %dx%d 像素\n", L.cols, L.rows, L.cell_w, L.cell_h);
     if (L.off_x > 0 || L.off_y > 0) {
         printf("画面居中显示，黑边: 左右各 %d 像素，上下各 %d 像素\n", L.off_x, L.off_y);
     }
-    if (src_fps < OUT_FPS - 0.5) {
-        printf("提示: 输入是 %.2ffps，将通过重复帧补到 %dfps\n", src_fps, OUT_FPS);
+    if ((int)lround(src_fps) > p->fps) {
+        printf("提示: 输入是 %.2ffps，输出取 %dfps（补到更高帧率只会重复帧，画面不会更流畅）\n",
+               src_fps, p->fps);
+    } else if (src_fps + 0.5 < p->fps) {
+        printf("提示: 输入是 %.2ffps，将通过重复帧补到 %dfps\n", src_fps, p->fps);
     }
 
     /* 步骤4：预渲染字形图集 */
@@ -1098,16 +1540,19 @@ static int convert(const char *input, const char *output, int req_cols)
     }
     printf("使用字符集: %d 个字符（由暗到亮）\n[%s]\n", FONT_CHAR_COUNT, atlas.chars);
 
-    /* 步骤5：启动解码和编码两个 ffmpeg 进程 */
-    const int have_x264 = exit_ok(system("ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264"));
-    const char *vcodec = have_x264
-        ? "-c:v libx264 -preset " X264_PRESET " -crf " X264_CRF
-        : "-c:v mpeg4 -q:v 2";
-    printf("视频编码器: %s\n", have_x264 ? "libx264 (H.264)" : "mpeg4（ffmpeg 没有 libx264）");
+    /* 步骤5：启动解码和编码两个 ffmpeg 进程
+     * 编码器已经在 choose_profile 里真跑过 3 帧，这里直接用选中的那个 */
+    char *enc_args = p->enc->fixed ? xasprintf("%s", p->enc->fixed)
+                                   : xasprintf("-b:v %ldk", hw_bitrate_kbps(p->width, p->height, p->fps));
+    if (!enc_args) {
+        goto cleanup;
+    }
+    printf("视频编码器: %s%s\n", p->enc->codec, p->enc->hardware ? "（硬件）" : "");
 
     qin = shell_quote(input);
     qout = shell_quote(output);
     if (!qin || !qout) {
+        free(enc_args);
         goto cleanup;
     }
 
@@ -1115,21 +1560,24 @@ static int convert(const char *input, const char *output, int req_cols)
     dec_cmd = xasprintf("ffmpeg -nostdin -v error -i %s -an -sn "
                         "-vf 'fps=%ld/%ld,scale=%d:%d:flags=area' -f rawvideo -pix_fmt rgb24 pipe:1",
                         qin, info.fps_num, info.fps_den, L.cols, L.rows);
-    /* 编码：从管道读取 2K 的 RGB 帧，转成 BT.709 的 yuv420p 并打上色彩标签，
+    /* 编码：从管道读取画布的 RGB 帧，转成 BT.709 的 yuv420p 并打上色彩标签，
      * 同时从原视频取第一条音轨（没有音轨则忽略） */
     enc_cmd = xasprintf("ffmpeg -y -v error -f rawvideo -pix_fmt rgb24 -s %dx%d -framerate %d -i pipe:0 "
                         "-i %s -map 0:v:0 -map '1:a:0?' "
-                        "-vf 'scale=out_color_matrix=bt709:out_range=tv,format=yuv420p' -r %d %s "
+                        "-vf 'scale=out_color_matrix=bt709:out_range=tv,format=yuv420p%s' -r %d -c:v %s %s "
                         "-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv "
                         "-c:a aac -b:a 192k -movflags +faststart -shortest %s",
-                        OUT_WIDTH, OUT_HEIGHT, OUT_FPS, qin, OUT_FPS, vcodec, qout);
+                        p->width, p->height, p->fps, qin,
+                        p->enc->pipe_filter ? p->enc->pipe_filter : "", p->fps,
+                        p->enc->codec, enc_args, qout);
+    free(enc_args);
     if (!dec_cmd || !enc_cmd) {
         goto cleanup;
     }
 
     const size_t cell_bytes = (size_t)L.cols * L.rows * 3;
-    const size_t canvas_stride = (size_t)OUT_WIDTH * 3;
-    const size_t canvas_bytes = canvas_stride * OUT_HEIGHT;
+    const size_t canvas_stride = (size_t)p->width * 3;
+    const size_t canvas_bytes = canvas_stride * (size_t)p->height;
     cells = malloc(cell_bytes);
     canvas = calloc(canvas_bytes, 1); /* 全黑；网格以外的区域始终保持黑色 */
     if (!cells || !canvas) {
@@ -1153,10 +1601,10 @@ static int convert(const char *input, const char *output, int req_cols)
     int write_failed = 0;
 
     while (fread(cells, 1, cell_bytes, dec) == cell_bytes) {
-        /* 第 i 帧源画面要在 60fps 输出里占几帧：floor((i+1)*60/fps) - floor(i*60/fps)
-         * 源帧率低于 60 时会重复若干次；高于 60 时个别帧会被丢弃 */
-        const int64_t a = (src_index * OUT_FPS * info.fps_den) / info.fps_num;
-        const int64_t b = ((src_index + 1) * OUT_FPS * info.fps_den) / info.fps_num;
+        /* 第 i 帧源画面要在输出帧率里占几帧：floor((i+1)*out/fps) - floor(i*out/fps)
+         * 输出帧率不超过源帧率时这个值恒为 1，不会白白重复写同一张画布 */
+        const int64_t a = (src_index * p->fps * info.fps_den) / info.fps_num;
+        const int64_t b = ((src_index + 1) * p->fps * info.fps_den) / info.fps_num;
         const int64_t repeat = b - a;
         src_index++;
 
@@ -1194,17 +1642,20 @@ static int convert(const char *input, const char *output, int req_cols)
 
     if (write_failed || !exit_ok(enc_status)) {
         fprintf(stderr, "编码失败（ffmpeg 编码进程异常退出），请检查输出路径和磁盘空间\n");
+        remove(output); /* 别把半成品留在磁盘上 */
         goto cleanup;
     }
     if (src_index == 0) {
         fprintf(stderr, "没有解码到任何画面\n");
+        remove(output);
         goto cleanup;
     }
     if (!exit_ok(dec_status)) {
         fprintf(stderr, "警告: 解码过程中出现错误，输出视频可能不完整\n");
     }
 
-    printf("转换完成! 源帧数: %lld，输出帧数: %lld (%dfps)\n", (long long)src_index, (long long)out_frames, OUT_FPS);
+    printf("转换完成! 源帧数: %lld，输出帧数: %lld (%dfps)\n", (long long)src_index,
+           (long long)out_frames, p->fps);
     printf("已合并原视频音频（原视频没有音轨则无声）\n");
     printf("输出文件: %s\n", output);
     ret = 1;
@@ -1244,14 +1695,21 @@ static int terminal_columns(void)
 int main(int argc, char *argv[])
 {
     if (argc < 3) {
-        printf("用法: %s <input-video> <output-video> [ASCII宽度|auto]\n", argv[0]);
+        printf("用法: %s <input-video> <output-video> [ASCII宽度|auto] [质量|auto]\n", argv[0]);
         printf("示例: %s miku.mp4 ascii.mp4\n", argv[0]);
-        printf("示例: %s miku.mp4 ascii.mp4 426\n", argv[0]);
-        printf("输出固定为 %dx%d @ %dfps\n", OUT_WIDTH, OUT_HEIGHT, OUT_FPS);
+        printf("示例: %s miku.mp4 ascii.mp4 426 high\n", argv[0]);
+        printf("示例: %s miku.mp4 ascii.mp4 auto 1920x1080@30\n", argv[0]);
         printf("ASCII宽度: %d-%d，越大字符越多越细，但单个字符越小\n",
                MIN_ASCII_WIDTH, MAX_ASCII_WIDTH);
-        printf("          省略或写 auto 时跟随终端列数（不在终端里运行则用 %d）\n",
+        printf("            省略或写 auto 时跟随终端列数（不在终端里运行则用 %d）\n",
                DEFAULT_ASCII_WIDTH);
+        printf("质量档位: auto（默认，按核数/内存/可用硬件编码器自动降级）\n");
+        for (int i = 0; i < TIER_COUNT; ++i) {
+            printf("          %-4s %dx%d @ %dfps\n", TIERS[i].name, TIERS[i].width,
+                   TIERS[i].height, TIERS[i].fps);
+        }
+        printf("          也可以直接给尺寸：1920x1080 或 1920x1080@30\n");
+        printf("输出帧率不会超过源帧率；64 位 ARM 手机上优先用硬件编码器\n");
         return 1;
     }
 
@@ -1285,8 +1743,28 @@ int main(int argc, char *argv[])
             }
         }
     }
+
+    /* 第4个参数：质量档位。旧版这里是已取消的缩放系数，给纯数字时仍按旧提示忽略 */
+    const char *quality = "auto";
     if (argc >= 5) {
-        fprintf(stderr, "提示: 第4个参数（缩放系数）已取消，字符大小现在由ASCII宽度自动决定，已忽略\n");
+        int w = 0, h = 0, f = 0;
+        int numeric = 1;
+        for (const char *c = argv[4]; *c; ++c) {
+            if (*c < '0' || *c > '9') {
+                numeric = 0;
+                break;
+            }
+        }
+        if (numeric) {
+            fprintf(stderr, "提示: 第4个参数（缩放系数）已取消，字符大小由ASCII宽度自动决定，已忽略\n");
+        } else if (parse_custom_size(argv[4], &w, &h, &f) || strcmp(argv[4], "auto") == 0 ||
+                   strcmp(argv[4], "high") == 0 || strcmp(argv[4], "mid") == 0 ||
+                   strcmp(argv[4], "low") == 0) {
+            quality = argv[4];
+        } else {
+            fprintf(stderr, "错误: 质量参数无效，可用 auto / high / mid / low / 1920x1080[@30]\n");
+            return 1;
+        }
     }
 
     if (strcmp(input, output) == 0) {
@@ -1302,7 +1780,7 @@ int main(int argc, char *argv[])
     signal(SIGPIPE, SIG_IGN);
 
     printf("========================================\n");
-    printf("原彩ASCII视频转换器 v4.1 (C17)\n");
+    printf("原彩ASCII视频转换器 v4.3 (C17)\n");
     printf("========================================\n");
 
     if (term_cols > 0) {
@@ -1314,7 +1792,57 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (convert(input, output, cols)) {
+    VideoInfo info;
+    if (!probe_video(input, &info)) {
+        fprintf(stderr, "无法读取视频信息: %s\n", input);
+        return 1;
+    }
+    const double src_fps = (double)info.fps_num / info.fps_den;
+    printf("视频信息: %dx%d, %.3ffps, %ld帧\n", info.width, info.height, src_fps, info.total_frames);
+
+    Profile prof;
+    memset(&prof, 0, sizeof prof);
+    if (!choose_profile(quality, (int)lround(src_fps), &prof)) {
+        fprintf(stderr, "错误: 没有可用的视频编码器，或质量参数无效\n");
+        return 1;
+    }
+    printf("性能诊断: %d 核 / %ld MB 内存 / 预算 %.2f CPU秒每视频秒\n", cpu_cores(),
+           total_memory_mb(), cpu_cores() * CPU_BUDGET_RATIO);
+
+    int ok = convert(input, output, cols, &prof, &info);
+
+    /* 硬件编码器可能"成功"却漏帧，抽查最后一秒；不合格就当失败走软件重试 */
+    if (ok && prof.enc->hardware && !output_tail_ok(output, &prof)) {
+        fprintf(stderr, "硬件编码的输出缺帧，改用软件编码重做一次\n");
+        ok = 0;
+    }
+
+    /* 硬件编码器在真机上仍可能中途失败（驱动/会话被占用），自动退回软件再试一次 */
+    if (!ok && prof.enc->hardware) {
+        fprintf(stderr, "硬件编码 %s 失败，改用软件编码重试一次\n", prof.enc->codec);
+        const EncoderCand *sw = NULL;
+        for (int i = 0; i < ENCODER_COUNT && !sw; ++i) {
+            if (ENCODERS[i].hardware || !encoder_listed(i)) {
+                continue;
+            }
+            if (encoder_works(&ENCODERS[i], prof.width, prof.height, prof.fps)) {
+                sw = &ENCODERS[i];
+            }
+        }
+        if (sw) {
+            prof.enc = sw;
+            remove(output);
+            ok = convert(input, output, cols, &prof, &info);
+        }
+    }
+
+    if (ok) {
+        /* libx264 已经通过 -x264-params 写全了色标，其它编码器补一次 */
+        if (strcmp(prof.enc->codec, "libx264") != 0) {
+            if (stamp_bt709(output)) {
+                printf("色标: 已补写 BT.709（该编码器本身不写 color_primaries）\n");
+            }
+        }
         printf("========================================\n");
         printf("成功创建彩色ASCII视频!\n");
         printf("输出文件: %s\n", output);
