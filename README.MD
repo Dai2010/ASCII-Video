@@ -1,3 +1,11 @@
+# 新版本v4.5：三种模式 + 播放带声音 + start.sh 支持 Termux/macOS
+- **三种模式**：默认只转码；`--play` 转完播放；`--play-only` 不转码、直接从源播放（最省 CPU，也不写文件）
+- **临时文件自动清理**：`--play` 时省略输出文件名，就用 `$TMPDIR` 里的临时文件；播完、按 `q`、Ctrl+C 都会删掉，转换失败也不留半成品
+- **播放带声音**：有音轨时用 `mpv --no-video`（没有 mpv 就用 `ffplay -nodisp`）同步放声，`--mute` 可关。音频解码只占个位数百分比 CPU，真正吃 CPU 的是往终端刷字符 —— 跟不上就 `--mute` 或把宽度调小
+- **start.sh 重写成 POSIX sh**：不再依赖 `/bin/bash`（Termux 只有 `/bin/sh`）。检测顺序 Termux（`pkg install`，不整机升级、不用 sudo）→ macOS（brew）→ Debian/Fedora/RHEL/Arch（apt/dnf/yum/pacman），只装缺的包，`-march=native` 失败自动回落
+- **跨系统内存探测**：Linux/Android 读 `/proc/meminfo`，macOS/BSD 走 `sysctl hw.memsize` / `hw.physmem`，读不到就不做内存限制
+- 播放时终端放不下会自动减少列数；`--play` 可与 `--mute` 组合，`--play-only` 也可单独用
+
 # 新版本v4.4：转完直接在终端播放 + 转换提速
 - **终端播放**：加 `--play`，转码完成后用同一套字符选择与配色直接在终端里播一遍，按 `q` 退出。播放不经过视频编码，所以不额外花时间；终端放不下会自动减少列数，退出时恢复光标与颜色
 - **x264 参数可用环境变量覆盖**：`MIKU_PRESET`、`MIKU_CRF`。想快就用 `MIKU_PRESET=ultrafast MIKU_CRF=21` —— 实测编码阶段耗时减半，同画质体积大约 +60%（ultrafast 关掉了 CABAC）
@@ -90,7 +98,12 @@
    - 档位决定输出分辨率与目标帧率，实际帧率不超过源帧率
    - 字符大小由「输出宽度 / ASCII宽度」自动决定，档位越低字符越小
  - 例：`./miku in.mp4 out.mp4 320 low`、`./miku in.mp4 out.mp4 auto 1920x1080@30`
- - `--play`：放在任意位置都行，转完直接在终端播放；`./miku --play in.mp4 out.mp4 160 high`
+ - 模式参数（位置随意，可以和别的参数混着写）：
+   - 默认：只转码
+   - `--play`：转完播放；**省略输出文件名**就用临时文件，播完/中断自动删除
+   - `--play-only`：不转码，直接从源播放（最省 CPU，不写文件）
+   - `--mute`：播放时不出声（默认有音轨就用 mpv 或 ffplay 放声音）
+   - 例：`./miku --play in.mp4 160`、`./miku --play-only in.mp4 120 low`、`./miku --play --mute in.mp4 out.mp4`
 
 
 感谢您收看此视觉盛宴 非常感谢您的支持

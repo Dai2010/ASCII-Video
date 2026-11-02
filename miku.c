@@ -47,6 +47,7 @@
 #define _DEFAULT_SOURCE 1        /* 需要 struct winsize（终端尺寸），glibc 在纯 POSIX 模式下不暴露 */
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <math.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -56,6 +57,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
@@ -774,22 +776,36 @@ static int stamp_bt709(const char *output)
     return done;
 }
 
-/* 物理内存（MB）；读不到返回 0 */
+/* 物理内存（MB）；读不到返回 0（0 表示不做内存限制） */
 static long total_memory_mb(void)
 {
+    /* Linux / Android */
     FILE *f = fopen("/proc/meminfo", "r");
-    if (!f) {
-        return 0;
-    }
-    long kb = 0;
-    char line[128];
-    while (fgets(line, sizeof line, f)) {
-        if (sscanf(line, "MemTotal: %ld kB", &kb) == 1) {
-            break;
+    if (f) {
+        long kb = 0;
+        char line[128];
+        while (fgets(line, sizeof line, f)) {
+            if (sscanf(line, "MemTotal: %ld kB", &kb) == 1) {
+                break;
+            }
+        }
+        fclose(f);
+        if (kb > 0) {
+            return kb / 1024;
         }
     }
-    fclose(f);
-    return kb > 0 ? kb / 1024 : 0;
+
+    /* macOS / BSD 没有 /proc，用 sysctl；不同系统字段名不同，两个都试 */
+    FILE *p = popen("(sysctl -n hw.memsize || /usr/sbin/sysctl -n hw.memsize "
+                    "|| sysctl -n hw.physmem || /usr/sbin/sysctl -n hw.physmem) 2>/dev/null",
+                    "r");
+    if (!p) {
+        return 0;
+    }
+    long long bytes = 0;
+    const int got = fscanf(p, "%lld", &bytes) == 1;
+    pclose(p);
+    return (got && bytes > 0) ? (long)(bytes / (1024 * 1024)) : 0;
 }
 
 /* 可用的核数；设 MIKU_CORES=N 可手工压低调度（省电、共享主机、老旧设备） */
@@ -1850,6 +1866,99 @@ static int terminal_rows(void)
     return (int)ws.ws_row;
 }
 
+/* 临时视频路径：$TMPDIR 或 /tmp，播放完就删 */
+static char *temp_video_path(void)
+{
+    return xasprintf("%s/miku-%ld-%ld.mp4", temp_dir(), (long)getpid(), (long)time(NULL));
+}
+
+/* 源里有没有音轨 */
+static int has_audio_stream(const char *input)
+{
+    char *q = shell_quote(input);
+    if (!q) {
+        return 0;
+    }
+    char *cmd = xasprintf("ffprobe -v error -select_streams a:0 -show_entries stream=index "
+                          "-of csv=p=0 %s 2>/dev/null",
+                          q);
+    free(q);
+    if (!cmd) {
+        return 0;
+    }
+    FILE *p = popen(cmd, "r");
+    free(cmd);
+    if (!p) {
+        return 0;
+    }
+    char line[32];
+    const int has = fgets(line, sizeof line, p) != NULL;
+    pclose(p);
+    return has;
+}
+
+static pid_t g_audio_pid = -1;
+
+/*
+ * 只放声音：优先 mpv（--no-video 连视频都不解，CPU 很轻），其次 ffplay。
+ * 低配设备上真正吃 CPU 的是往终端刷字符，音频解码只占个位数百分比；
+ * 真跟不上就 --mute 或降低播放帧率。
+ */
+static int start_audio(const char *input)
+{
+    const char *player = NULL;
+    const char *args[8];
+    int n = 0;
+
+    if (command_exists("mpv")) {
+        player = "mpv";
+        args[n++] = "mpv";
+        args[n++] = "--no-video";
+        args[n++] = "--really-quiet";
+        args[n++] = "--no-terminal";
+        args[n++] = "--";
+        args[n++] = input;
+    } else if (command_exists("ffplay")) {
+        player = "ffplay";
+        args[n++] = "ffplay";
+        args[n++] = "-nodisp";
+        args[n++] = "-autoexit";
+        args[n++] = "-loglevel";
+        args[n++] = "quiet";
+        args[n++] = input;
+    } else {
+        return 0;
+    }
+    args[n] = NULL;
+
+    const pid_t pid = fork();
+    if (pid == 0) {
+        const int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        execvp(player, (char *const *)args);
+        _exit(127);
+    }
+    if (pid < 0) {
+        return 0;
+    }
+    g_audio_pid = pid;
+    return 1;
+}
+
+static void stop_audio(void)
+{
+    if (g_audio_pid > 0) {
+        kill(g_audio_pid, SIGTERM);
+        int status = 0;
+        waitpid(g_audio_pid, &status, 0);
+        g_audio_pid = -1;
+    }
+}
+
 /* 按字节数扩容的缓冲区 */
 typedef struct {
     char *buf;
@@ -1890,7 +1999,8 @@ static int sb_addf(StrBuf *sb, const char *fmt, ...)
     return 1;
 }
 
-static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, int play_fps)
+static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, int play_fps,
+                         int with_audio)
 {
     GlyphAtlas atlas;
     memset(&atlas, 0, sizeof atlas);
@@ -1945,6 +2055,11 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
     play_raw_mode();
     atexit(play_restore_term);
     fputs("\x1b[?25l\x1b[2J", stdout); /* 藏光标、清屏 */
+
+    const int audio = with_audio && has_audio_stream(input) && start_audio(input);
+    if (audio) {
+        atexit(stop_audio); /* 异常退出也别让声音一直响 */
+    }
 
     const double start = now_seconds();
     int64_t frame = 0;
@@ -2003,6 +2118,9 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
     }
 
     fputs("\x1b[0m\r\n", stdout);
+    if (g_audio_pid > 0) {
+        stop_audio(); /* 播完或中途退出都停掉声音 */
+    }
     ret = 1;
 
 cleanup:
@@ -2035,43 +2153,94 @@ int main(int argc, char *argv[])
         }
         printf("          也可以直接给尺寸：1920x1080 或 1920x1080@30\n");
         printf("输出帧率不会超过源帧率；64 位 ARM 手机上优先用硬件编码器\n");
-        printf("--play: 转码完成后直接在终端里按 ASCII 播放（q 退出）\n");
+        printf("模式: 默认只转码；--play 转完播放；--play-only 不转码直接播放\n");
+        printf("      --play 时省略输出文件名 = 用临时文件，播完（或中断）自动删除\n");
+        printf("      --mute 播放时不出声（默认有音轨就会用 mpv/ffplay 放声音）\n");
         return 1;
     }
 
-    /* 把 --play 从参数里摘出来，其余按位置解析 */
-    int want_play = 0;
+    /* 先把 --flag 摘出来，其余按位置解析 */
+    int want_play = 0, play_only = 0, mute = 0;
     const char *pos[4] = {NULL, NULL, NULL, NULL};
     int npos = 0;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--play") == 0) {
             want_play = 1;
+        } else if (strcmp(argv[i], "--play-only") == 0) {
+            want_play = 1;
+            play_only = 1;
+        } else if (strcmp(argv[i], "--mute") == 0) {
+            mute = 1;
         } else if (npos < 4) {
             pos[npos++] = argv[i];
         }
     }
-    if (npos < 2) {
-        fprintf(stderr, "错误: 至少要给输入与输出文件名（用法加 -h 前先跑一次不带参数看提示）\n");
+    if (npos < 1) {
+        fprintf(stderr, "错误: 至少要给输入文件名\n");
         return 1;
     }
 
     const char *input = pos[0];
-    const char *output = pos[1];
+    int pi = 1; /* 位置参数游标 */
+
+    /* 播放模式下，第二个位置参数可能是宽度（纯数字或 auto）——那就没有输出文件 */
+    const char *output = NULL;
+    int width_given = 0;
+    if (npos > pi) {
+        const char *a = pos[pi];
+        int is_width = strcmp(a, "auto") == 0;
+        if (!is_width && *a != '\0') {
+            is_width = 1;
+            for (const char *c = a; *c; ++c) {
+                if (*c < '0' || *c > '9') {
+                    is_width = 0;
+                    break;
+                }
+            }
+        }
+        if (want_play && is_width) {
+            width_given = 1;
+        } else {
+            output = a;
+            ++pi;
+            width_given = (npos > pi);
+        }
+    }
+
+    char *temp_out = NULL;
+    int output_is_temp = 0;
+    if (play_only) {
+        output = NULL; /* 不转码，不需要输出文件 */
+    } else if (!output) {
+        if (!want_play) {
+            fprintf(stderr, "错误: 转码需要输出文件名\n");
+            return 1;
+        }
+        temp_out = temp_video_path();
+        if (!temp_out) {
+            fprintf(stderr, "错误: 申请临时文件路径失败\n");
+            return 1;
+        }
+        output = temp_out;
+        output_is_temp = 1;
+    }
+
     int cols = DEFAULT_ASCII_WIDTH;
     int term_cols = 0;  /* 非 0 表示这次宽度来自终端，稍后打印适配结果 */
     char *end = NULL;
-    int auto_width = (npos < 3);  /* 没给宽度就自动适配终端 */
+    int auto_width = !width_given;
 
-    if (npos >= 3) {
-        if (strcmp(pos[2], "auto") == 0) {
+    if (width_given && npos > pi) {
+        if (strcmp(pos[pi], "auto") == 0) {
             auto_width = 1;
         } else {
-            cols = (int)strtol(pos[2], &end, 10);
-            if (end == pos[2] || *end != '\0') {
+            cols = (int)strtol(pos[pi], &end, 10);
+            if (end == pos[pi] || *end != '\0') {
                 fprintf(stderr, "错误: ASCII宽度必须是整数或 auto\n");
                 return 1;
             }
         }
+        ++pi;
     }
     if (auto_width) {
         term_cols = terminal_columns();
@@ -2086,12 +2255,12 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* 第4个参数：质量档位。旧版这里是已取消的缩放系数，给纯数字时仍按旧提示忽略 */
+    /* 质量档位。旧版这里是已取消的缩放系数，给纯数字时仍按旧提示忽略 */
     const char *quality = "auto";
-    if (npos >= 4) {
+    if (npos > pi) {
         int w = 0, h = 0, f = 0;
         int numeric = 1;
-        for (const char *c = pos[3]; *c; ++c) {
+        for (const char *c = pos[pi]; *c; ++c) {
             if (*c < '0' || *c > '9') {
                 numeric = 0;
                 break;
@@ -2099,17 +2268,17 @@ int main(int argc, char *argv[])
         }
         if (numeric) {
             fprintf(stderr, "提示: 第4个参数（缩放系数）已取消，字符大小由ASCII宽度自动决定，已忽略\n");
-        } else if (parse_custom_size(pos[3], &w, &h, &f) || strcmp(pos[3], "auto") == 0 ||
-                   strcmp(pos[3], "high") == 0 || strcmp(pos[3], "mid") == 0 ||
-                   strcmp(pos[3], "low") == 0) {
-            quality = pos[3];
+        } else if (parse_custom_size(pos[pi], &w, &h, &f) || strcmp(pos[pi], "auto") == 0 ||
+                   strcmp(pos[pi], "high") == 0 || strcmp(pos[pi], "mid") == 0 ||
+                   strcmp(pos[pi], "low") == 0) {
+            quality = pos[pi];
         } else {
             fprintf(stderr, "错误: 质量参数无效，可用 auto / high / mid / low / 1920x1080[@30]\n");
             return 1;
         }
     }
 
-    if (strcmp(input, output) == 0) {
+    if (output && strcmp(input, output) == 0) {
         fprintf(stderr, "错误: 输出文件不能和输入文件相同\n");
         return 1;
     }
@@ -2122,7 +2291,7 @@ int main(int argc, char *argv[])
     signal(SIGPIPE, SIG_IGN);
 
     printf("========================================\n");
-    printf("原彩ASCII视频转换器 v4.3 (C17)\n");
+    printf("原彩ASCII视频转换器 v4.5 (C17)\n");
     printf("========================================\n");
 
     if (term_cols > 0) {
@@ -2142,43 +2311,56 @@ int main(int argc, char *argv[])
     const double src_fps = (double)info.fps_num / info.fps_den;
     printf("视频信息: %dx%d, %.3ffps, %ld帧\n", info.width, info.height, src_fps, info.total_frames);
 
-    Profile prof;
-    memset(&prof, 0, sizeof prof);
-    if (!choose_profile(quality, (int)lround(src_fps), &prof)) {
-        fprintf(stderr, "错误: 没有可用的视频编码器，或质量参数无效\n");
-        return 1;
-    }
-    printf("性能诊断: %d 核 / %ld MB 内存 / 预算 %.2f CPU秒每视频秒\n", cpu_cores(),
-           total_memory_mb(), cpu_cores() * CPU_BUDGET_RATIO);
+    if (play_only) {
+        printf("模式: 不转码，直接从源播放\n");
+    } else {
+        Profile prof;
+        memset(&prof, 0, sizeof prof);
+        if (!choose_profile(quality, (int)lround(src_fps), &prof)) {
+            fprintf(stderr, "错误: 没有可用的视频编码器，或质量参数无效\n");
+            return 1;
+        }
+        printf("性能诊断: %d 核 / %ld MB 内存 / 预算 %.2f CPU秒每视频秒\n", cpu_cores(),
+               total_memory_mb(), cpu_cores() * CPU_BUDGET_RATIO);
 
-    int ok = convert(input, output, cols, &prof, &info);
+        int ok = convert(input, output, cols, &prof, &info);
 
-    /* 硬件编码器可能"成功"却漏帧，抽查最后一秒；不合格就当失败走软件重试 */
-    if (ok && prof.enc->hardware && !output_tail_ok(output, &prof)) {
-        fprintf(stderr, "硬件编码的输出缺帧，改用软件编码重做一次\n");
-        ok = 0;
-    }
+        /* 硬件编码器可能"成功"却漏帧，抽查最后一秒；不合格就当失败走软件重试 */
+        if (ok && prof.enc->hardware && !output_tail_ok(output, &prof)) {
+            fprintf(stderr, "硬件编码的输出缺帧，改用软件编码重做一次\n");
+            ok = 0;
+        }
 
-    /* 硬件编码器在真机上仍可能中途失败（驱动/会话被占用），自动退回软件再试一次 */
-    if (!ok && prof.enc->hardware) {
-        fprintf(stderr, "硬件编码 %s 失败，改用软件编码重试一次\n", prof.enc->codec);
-        const EncoderCand *sw = NULL;
-        for (int i = 0; i < ENCODER_COUNT && !sw; ++i) {
-            if (ENCODERS[i].hardware || !encoder_listed(i)) {
-                continue;
+        /* 硬件编码器在真机上仍可能中途失败（驱动/会话被占用），自动退回软件再试一次 */
+        if (!ok && prof.enc->hardware) {
+            fprintf(stderr, "硬件编码 %s 失败，改用软件编码重试一次\n", prof.enc->codec);
+            const EncoderCand *sw = NULL;
+            for (int i = 0; i < ENCODER_COUNT && !sw; ++i) {
+                if (ENCODERS[i].hardware || !encoder_listed(i)) {
+                    continue;
+                }
+                if (encoder_works(&ENCODERS[i], prof.width, prof.height, prof.fps)) {
+                    sw = &ENCODERS[i];
+                }
             }
-            if (encoder_works(&ENCODERS[i], prof.width, prof.height, prof.fps)) {
-                sw = &ENCODERS[i];
+            if (sw) {
+                prof.enc = sw;
+                remove(output);
+                ok = convert(input, output, cols, &prof, &info);
             }
         }
-        if (sw) {
-            prof.enc = sw;
-            remove(output);
-            ok = convert(input, output, cols, &prof, &info);
-        }
-    }
 
-    if (ok) {
+        if (!ok) {
+            if (output_is_temp) {
+                remove(output);
+            }
+            fprintf(stderr, "========================================\n");
+            fprintf(stderr, "转换失败!\n");
+            fprintf(stderr, "========================================\n");
+            free(temp_out);
+            return 1;
+        }
+
         /* libx264 已经通过 -x264-params 写全了色标，其它编码器补一次 */
         if (strcmp(prof.enc->codec, "libx264") != 0) {
             if (stamp_bt709(output)) {
@@ -2187,22 +2369,27 @@ int main(int argc, char *argv[])
         }
         printf("========================================\n");
         printf("成功创建彩色ASCII视频!\n");
-        printf("输出文件: %s\n", output);
+        printf("输出文件: %s%s\n", output, output_is_temp ? "（临时，播完自动删除）" : "");
         printf("========================================\n");
-
-        if (want_play) {
-            /* 播放不需要编码，直接按终端网格重走一遍源；帧率封到 24，终端刷不过来 */
-            int play_fps = (int)lround(src_fps);
-            play_fps = play_fps < 1 ? 1 : (play_fps > 24 ? 24 : play_fps);
-            printf("在终端播放（按 q 退出）...\n");
-            fflush(stdout);
-            play_terminal(input, cols, &info, play_fps);
-        }
-        return 0;
     }
 
-    fprintf(stderr, "========================================\n");
-    fprintf(stderr, "转换失败!\n");
-    fprintf(stderr, "========================================\n");
-    return 1;
+    if (want_play) {
+        /* 播放不需要编码，直接按终端网格重走一遍源；帧率封到 24，终端刷不过来 */
+        int play_fps = (int)lround(src_fps);
+        play_fps = play_fps < 1 ? 1 : (play_fps > 24 ? 24 : play_fps);
+        printf("在终端播放（按 q 退出%s）...\n", mute ? "，静音" : "");
+        fflush(stdout);
+        play_terminal(input, cols, &info, play_fps, !mute);
+
+        if (output_is_temp) {
+            if (remove(output) == 0) {
+                printf("已删除临时文件: %s\n", output);
+            } else {
+                fprintf(stderr, "临时文件删除失败，请手动清理: %s\n", output);
+            }
+        }
+    }
+
+    free(temp_out);
+    return 0;
 }
