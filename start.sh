@@ -136,6 +136,10 @@ ensure_deps() {
     if ! command -v mpv >/dev/null 2>&1 && ! command -v ffplay >/dev/null 2>&1; then
         missing="$missing mpv"
     fi
+    # 界面里的文件选择器：fzf 最好用，dialog 次之；两个都没有就把 fzf 装上
+    if ! command -v fzf >/dev/null 2>&1 && ! command -v dialog >/dev/null 2>&1; then
+        missing="$missing fzf"
+    fi
     missing=$(echo "$missing" | tr ' ' '\n' | sort -u | tr '\n' ' ')
     missing=${missing# }
 

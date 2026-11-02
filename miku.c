@@ -3020,24 +3020,44 @@ static void ui_join(char *dst, size_t cap, const char *dir, const char *name)
 
 /* ---------------- 外部选择器（有就用外部工具，没有才用内置列表） ---------------- */
 
-/* 读一行到 out；返回 1 成功 */
-static int ui_read_first_line(const char *path, char *out, size_t cap)
+/* 读选择器的结果：按 NUL 或换行截断（fzf 用 --print0 输出，文件名里有换行也不怕） */
+static int ui_read_result(const char *path, char *out, size_t cap)
 {
-    FILE *f = fopen(path, "r");
+    out[0] = '\0';
+    FILE *f = fopen(path, "rb");
     if (!f) {
         return 0;
     }
-    out[0] = '\0';
-    if (!fgets(out, (int)cap, f)) {
-        fclose(f);
-        return 0;
-    }
+    size_t n = fread(out, 1, cap - 1, f);
     fclose(f);
-    const size_t n = strlen(out);
-    if (n > 0 && out[n - 1] == '\n') {
-        out[n - 1] = '\0';
+    out[n] = '\0';
+    for (size_t i = 0; i < n; ++i) {
+        if (out[i] == '\n' || out[i] == '\0') {
+            out[i] = '\0';
+            break;
+        }
     }
     return out[0] != '\0';
+}
+
+/*
+ * 收下外部选择器给的路径：必须是存在、可读的普通文件，最后统一成绝对路径。
+ * 校验不过就返回 0 —— 宁可报错让用户重选，也不把坏路径塞回配置。
+ */
+static int ui_accept_path(char *path, size_t cap)
+{
+    if (!path[0]) {
+        return 0;
+    }
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || access(path, R_OK) != 0) {
+        return 0;
+    }
+    char abs[1024];
+    if (realpath(path, abs) != NULL) {
+        snprintf(path, cap, "%s", abs);
+    }
+    return 1;
 }
 
 /* fzf：同样的目录模型，但列表交给它，自带模糊搜索与高亮。返回 1 选中 / -1 取消 / 0 不可用 */
@@ -3086,7 +3106,7 @@ static int ui_pick_with_fzf(char *out, size_t cap, const char *start)
         char *q_res = shell_quote(res);
         char *cmd = NULL;
         if (q_dir && q_in && q_res) {
-            cmd = xasprintf("fzf --height=100%% --reverse --cycle --prompt='%s > ' "
+            cmd = xasprintf("fzf --height=100%% --reverse --cycle --print0 --prompt='%s > ' "
                             "--header='Enter 进入/选定  Esc 取消（直接输入可搜索）' < %s > %s",
                             q_dir, q_in, q_res);
         }
@@ -3102,8 +3122,8 @@ static int ui_pick_with_fzf(char *out, size_t cap, const char *start)
             free(cmd);
         }
 
-        char chosen[512];
-        const int got = ui_read_first_line(res, chosen, sizeof chosen);
+        char chosen[1024];
+        const int got = ui_read_result(res, chosen, sizeof chosen);
         remove(in);
         remove(res);
         free(in);
@@ -3126,7 +3146,7 @@ static int ui_pick_with_fzf(char *out, size_t cap, const char *start)
             continue;
         }
         ui_join(out, cap, dir, chosen);
-        return 1;
+        return ui_accept_path(out, cap) ? 1 : -2;
     }
 }
 
@@ -3176,12 +3196,7 @@ static int ui_pick_with_dialog(char *out, size_t cap, const char *start)
     if (rc != 0 || !out[0]) {
         return -1;
     }
-    /* 统一成绝对路径：显示短、也不怕后面换目录 */
-    char abs[1024];
-    if (realpath(out, abs) != NULL) {
-        snprintf(out, cap, "%s", abs);
-    }
-    return 1;
+    return ui_accept_path(out, cap) ? 1 : -2;
 }
 
 /* 返回 1 = 选中（out 是路径），0 = 取消 */
@@ -3189,14 +3204,26 @@ static int ui_pick_file(char *out, size_t cap, const char *start)
 {
     if (command_exists("fzf")) {
         const int r = ui_pick_with_fzf(out, cap, start);
-        if (r != 0) {
-            return r > 0;
+        if (r == 1) {
+            return 1;
+        }
+        if (r == -1) {
+            return 0;
+        }
+        if (r == -2) {
+            return -1;
         }
     }
     if (command_exists("dialog")) {
         const int r = ui_pick_with_dialog(out, cap, start);
-        if (r != 0) {
-            return r > 0;
+        if (r == 1) {
+            return 1;
+        }
+        if (r == -1) {
+            return 0;
+        }
+        if (r == -2) {
+            return -1;
         }
     }
 
@@ -3353,7 +3380,7 @@ static int ui_pick_file(char *out, size_t cap, const char *start)
             } else {
                 ui_join(out, cap, dir, e->name);
                 free(list);
-                return 1;
+                return ui_accept_path(out, cap) ? 1 : -1;
             }
         }
     }
@@ -4114,8 +4141,12 @@ static int ui_config_screen(Config *st, int kind)
                 }
             } else if (item == CFG_INPUT) {
                 char picked[UI_PATH_MAX];
-                if (ui_pick_file(picked, sizeof picked, st->input[0] ? st->input : ".")) {
+                const int r = ui_pick_file(picked, sizeof picked,
+                                           st->input[0] ? st->input : ".");
+                if (r > 0) {
                     snprintf(st->input, sizeof st->input, "%s", picked);
+                } else if (r < 0) {
+                    ui_status(st, "选中的文件读不了（可能已被删除或没有权限），换一个试试");
                 }
             } else if (item == CFG_OUTPUT) {
                 ui_edit_field(st, CFG_OUTPUT, "输出视频路径（留空 = 自动）");
