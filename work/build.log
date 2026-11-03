@@ -1,0 +1,139 @@
+miku.c: In function ‘encoder_works’:
+miku.c:896:71: warning: ‘%s’ directive output may be truncated writing up to 255 bytes into a region of size 105 [-Wformat-truncation=]
+  896 |                     snprintf(buf, sizeof buf, "-vaapi_device /dev/dri/%s", e->d_name);
+      |                                                                       ^~
+In function ‘vaapi_device_arg’,
+    inlined from ‘cand_input_prefix’ at miku.c:937:23,
+    inlined from ‘encoder_works’ at miku.c:991:26:
+miku.c:896:21: note: ‘snprintf’ output between 24 and 279 bytes into a destination of size 128
+  896 |                     snprintf(buf, sizeof buf, "-vaapi_device /dev/dri/%s", e->d_name);
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+miku.c: In function ‘convert’:
+miku.c:896:71: warning: ‘%s’ directive output may be truncated writing up to 255 bytes into a region of size 105 [-Wformat-truncation=]
+  896 |                     snprintf(buf, sizeof buf, "-vaapi_device /dev/dri/%s", e->d_name);
+      |                                                                       ^~
+In function ‘vaapi_device_arg’,
+    inlined from ‘cand_input_prefix’ at miku.c:937:23,
+    inlined from ‘convert’ at miku.c:1816:30:
+miku.c:896:21: note: ‘snprintf’ output between 24 and 279 bytes into a destination of size 128
+  896 |                     snprintf(buf, sizeof buf, "-vaapi_device /dev/dri/%s", e->d_name);
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+miku.c: In function ‘tui_main.isra’:
+miku.c:3269:32: warning: ‘%s’ directive output may be truncated writing up to 1023 bytes into a region of size 511 [-Wformat-truncation=]
+ 3269 |         snprintf(dst, cap, "%s/%s", dir, name);
+      |                                ^~
+......
+ 3419 |         ui_join(out, cap, dir, chosen);
+      |                                ~~~~~~
+In function ‘ui_join’,
+    inlined from ‘ui_join’ at miku.c:3264:13,
+    inlined from ‘ui_pick_with_fzf’ at miku.c:3419:9,
+    inlined from ‘ui_pick_file’ at miku.c:3477:23,
+    inlined from ‘ui_config_screen’ at miku.c:4429:31,
+    inlined from ‘tui_main.isra’ at miku.c:4470:13:
+miku.c:3269:9: note: ‘snprintf’ output 2 or more bytes (assuming 1025) into a destination of size 512
+ 3269 |         snprintf(dst, cap, "%s/%s", dir, name);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+miku.c: In function ‘tui_main.isra’:
+miku.c:3267:30: warning: ‘%s’ directive output may be truncated writing up to 1023 bytes into a region of size 511 [-Wformat-truncation=]
+ 3267 |         snprintf(dst, cap, "/%s", name);
+      |                              ^~
+......
+ 3419 |         ui_join(out, cap, dir, chosen);
+      |                                ~~~~~~
+In function ‘ui_join’,
+    inlined from ‘ui_pick_with_fzf’ at miku.c:3419:9,
+    inlined from ‘ui_pick_file’ at miku.c:3477:23,
+    inlined from ‘ui_config_screen’ at miku.c:4429:31,
+    inlined from ‘tui_main.isra’ at miku.c:4470:13:
+miku.c:3267:9: note: ‘snprintf’ output between 2 and 1025 bytes into a destination of size 512
+ 3267 |         snprintf(dst, cap, "/%s", name);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+miku.c: In function ‘tui_main.isra’:
+miku.c:3311:30: warning: ‘%s’ directive output may be truncated writing up to 1023 bytes into a region of size 512 [-Wformat-truncation=]
+ 3311 |         snprintf(path, cap, "%s", abs);
+      |                              ^~   ~~~
+In function ‘ui_accept_path’,
+    inlined from ‘ui_accept_path’ at miku.c:3300:12,
+    inlined from ‘ui_pick_with_fzf’ at miku.c:3420:16,
+    inlined from ‘ui_pick_file’ at miku.c:3477:23,
+    inlined from ‘ui_config_screen’ at miku.c:4429:31,
+    inlined from ‘tui_main.isra’ at miku.c:4470:13:
+miku.c:3311:9: note: ‘snprintf’ output between 1 and 1024 bytes into a destination of size 512
+ 3311 |         snprintf(path, cap, "%s", abs);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+miku.c: In function ‘tui_main.isra’:
+miku.c:3439:48: warning: ‘snprintf’ output may be truncated before the last format character [-Wformat-truncation=]
+ 3439 |     snprintf(dir_slash, sizeof dir_slash, "%s%s", dir, dir[strlen(dir) - 1] == '/' ? "" : "/");
+      |                                                ^
+In function ‘ui_pick_with_dialog’,
+    inlined from ‘ui_pick_file’ at miku.c:3489:23,
+    inlined from ‘ui_config_screen’ at miku.c:4429:31,
+    inlined from ‘tui_main.isra’ at miku.c:4470:13:
+miku.c:3439:5: note: ‘snprintf’ output between 1 and 1025 bytes into a destination of size 1024
+ 3439 |     snprintf(dir_slash, sizeof dir_slash, "%s%s", dir, dir[strlen(dir) - 1] == '/' ? "" : "/");
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+miku.c: In function ‘tui_main.isra’:
+miku.c:3311:30: warning: ‘%s’ directive output may be truncated writing up to 1023 bytes into a region of size 512 [-Wformat-truncation=]
+ 3311 |         snprintf(path, cap, "%s", abs);
+      |                              ^~   ~~~
+In function ‘ui_accept_path’,
+    inlined from ‘ui_accept_path’ at miku.c:3300:12,
+    inlined from ‘ui_pick_with_dialog’ at miku.c:3470:12,
+    inlined from ‘ui_pick_file’ at miku.c:3489:23,
+    inlined from ‘ui_config_screen’ at miku.c:4429:31,
+    inlined from ‘tui_main.isra’ at miku.c:4470:13:
+miku.c:3311:9: note: ‘snprintf’ output between 1 and 1024 bytes into a destination of size 512
+ 3311 |         snprintf(path, cap, "%s", abs);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+miku.c: In function ‘tui_main.isra’:
+miku.c:3269:29: warning: ‘%s’ directive output may be truncated writing up to 1023 bytes into a region of size 512 [-Wformat-truncation=]
+ 3269 |         snprintf(dst, cap, "%s/%s", dir, name);
+      |                             ^~
+......
+ 3669 |                 ui_join(out, cap, dir, e->name);
+      |                                   ~~~
+In function ‘ui_join’,
+    inlined from ‘ui_join’ at miku.c:3264:13,
+    inlined from ‘ui_pick_file’ at miku.c:3669:17,
+    inlined from ‘ui_config_screen’ at miku.c:4429:31,
+    inlined from ‘tui_main.isra’ at miku.c:4470:13:
+miku.c:3269:9: note: ‘snprintf’ output between 2 and 1280 bytes into a destination of size 512
+ 3269 |         snprintf(dst, cap, "%s/%s", dir, name);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+miku.c: In function ‘tui_main.isra’:
+miku.c:3311:30: warning: ‘%s’ directive output may be truncated writing up to 1023 bytes into a region of size 512 [-Wformat-truncation=]
+ 3311 |         snprintf(path, cap, "%s", abs);
+      |                              ^~   ~~~
+In function ‘ui_accept_path’,
+    inlined from ‘ui_accept_path’ at miku.c:3300:12,
+    inlined from ‘ui_pick_file’ at miku.c:3671:24,
+    inlined from ‘ui_config_screen’ at miku.c:4429:31,
+    inlined from ‘tui_main.isra’ at miku.c:4470:13:
+miku.c:3311:9: note: ‘snprintf’ output between 1 and 1024 bytes into a destination of size 512
+ 3311 |         snprintf(path, cap, "%s", abs);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+miku.c: In function ‘tui_main.isra’:
+miku.c:3269:32: warning: ‘%s’ directive output may be truncated writing up to 255 bytes into a region of size between 0 and 1023 [-Wformat-truncation=]
+ 3269 |         snprintf(dst, cap, "%s/%s", dir, name);
+      |                                ^~
+In function ‘ui_join’,
+    inlined from ‘ui_join’ at miku.c:3264:13,
+    inlined from ‘ui_pick_file’ at miku.c:3656:21,
+    inlined from ‘ui_config_screen’ at miku.c:4429:31,
+    inlined from ‘tui_main.isra’ at miku.c:4470:13:
+miku.c:3269:9: note: ‘snprintf’ output between 2 and 1280 bytes into a destination of size 1024
+ 3269 |         snprintf(dst, cap, "%s/%s", dir, name);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+miku.c: In function ‘tui_main.isra’:
+miku.c:4189:29: warning: ‘%s’ directive output may be truncated writing up to 639 bytes into a region of size 240 [-Wformat-truncation=]
+ 4189 |         snprintf(dst, cap, "%s", last);
+      |                             ^~
+In function ‘ui_log_tail’,
+    inlined from ‘ui_convert’ at miku.c:4233:13,
+    inlined from ‘ui_start’ at miku.c:4366:10,
+    inlined from ‘ui_config_screen’ at miku.c:4424:21,
+    inlined from ‘tui_main.isra’ at miku.c:4470:13:
+miku.c:4189:9: note: ‘snprintf’ output between 1 and 640 bytes into a destination of size 240
+ 4189 |         snprintf(dst, cap, "%s", last);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

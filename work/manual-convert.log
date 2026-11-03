@@ -1,0 +1,54 @@
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/convert.c -o build/manual/convert.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_progress.c -o build/manual/ui_progress.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/main.c -o build/manual/main.o
+src/main.c: In function ‘main’:
+src/main.c:238:14: error: expected ‘)’ before ‘;’ token
+  238 | }, &res) == 0;
+      |              ^
+      |              )
+src/main.c:235:19: note: to match this ‘(’
+  235 |         } else if (!miku_run_convert(&(struct convert_request) {
+      |                   ^
+src/main.c:244:1: error: expected expression before ‘}’ token
+  244 | }
+      | ^
+src/main.c:121:13: warning: variable ‘output_is_temp’ set but not used [-Wunused-but-set-variable=]
+  121 |         int output_is_temp = 0;
+      |             ^~~~~~~~~~~~~~
+src/main.c:69:43: warning: variable ‘mute’ set but not used [-Wunused-but-set-variable=]
+   69 |         int want_play = 0, play_only = 0, mute = 0, style = STYLE_CHAR;
+      |                                           ^~~~
+src/main.c: At top level:
+src/main.c:246:1: error: expected identifier or ‘(’ before ‘else’
+  246 | else
+      | ^~~~
+src/main.c:255:1: error: expected identifier or ‘(’ before ‘if’
+  255 | if (want_play) {
+      | ^~
+src/main.c:283:1: warning: data definition has no type or storage class
+  283 | free(temp_out);
+      | ^~~~
+src/main.c:283:1: error: type defaults to ‘int’ in declaration of ‘free’ [-Wimplicit-int]
+src/main.c:283:1: error: parameter names (without types) in function declaration [-Wdeclaration-missing-parameter-type]
+src/main.c:283:1: error: conflicting types for ‘free’; have ‘int()’
+In file included from src/main.c:21:
+/usr/include/stdlib.h:691:13: note: previous declaration of ‘free’ with type ‘void(void *)’
+  691 | extern void free (void *__ptr) __THROW;
+      |             ^~~~
+src/main.c:284:1: error: expected identifier or ‘(’ before ‘return’
+  284 | return 0;
+      | ^~~~~~
+src/main.c:285:1: error: expected identifier or ‘(’ before ‘}’ token
+  285 | }
+      | ^
+make: *** [Makefile:20: build/manual/main.o] Error 1
+make: *** Waiting for unfinished jobs....
+src/ui_progress.c: In function ‘miku_ui_convert’:
+src/ui_progress.c:227:37: warning: ‘%s’ directive output may be truncated writing up to 639 bytes into a region of size 240 [-Wformat-truncation=]
+  227 |                 snprintf(dst, cap, "%s", last);
+      |                                     ^~
+In function ‘ui_log_tail’,
+    inlined from ‘miku_ui_convert’ at src/ui_progress.c:281:4:
+src/ui_progress.c:227:17: note: ‘snprintf’ output between 1 and 640 bytes into a destination of size 240
+  227 |                 snprintf(dst, cap, "%s", last);
+      |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

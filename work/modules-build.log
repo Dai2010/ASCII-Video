@@ -1,0 +1,14 @@
+src/audio.c: In function ‘audio_ipc_open’:
+src/audio.c:134:52: warning: ‘%s’ directive output may be truncated writing up to 255 bytes into a region of size 108 [-Wformat-truncation=]
+  134 |     snprintf(addr.sun_path, sizeof addr.sun_path, "%s", miku_g_audio_sock);
+      |                                                    ^~   ~~~~~~~~~~~~~~~~~
+src/audio.c:134:5: note: ‘snprintf’ output between 1 and 256 bytes into a destination of size 108
+  134 |     snprintf(addr.sun_path, sizeof addr.sun_path, "%s", miku_g_audio_sock);
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/encoder.c: In function ‘vaapi_device_arg’:
+src/encoder.c:183:71: warning: ‘%s’ directive output may be truncated writing up to 255 bytes into a region of size 105 [-Wformat-truncation=]
+  183 |                     snprintf(buf, sizeof buf, "-vaapi_device /dev/dri/%s", e->d_name);
+      |                                                                       ^~
+src/encoder.c:183:21: note: ‘snprintf’ output between 24 and 279 bytes into a destination of size 128
+  183 |                     snprintf(buf, sizeof buf, "-vaapi_device /dev/dri/%s", e->d_name);
+      |                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

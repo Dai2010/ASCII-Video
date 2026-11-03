@@ -1,0 +1,7 @@
+make: Nothing to be done for 'all'.
+timeout 5s build/playback-test
+playback IPC: PASS
+timeout 10s build/render-test
+render equivalence: PASS
+timeout 5s build/buffer-test
+buffer boundaries: PASS

@@ -1,0 +1,2 @@
+拒绝清理 build/ 以外的目录
+make: *** [Makefile:52: clean] Error 1

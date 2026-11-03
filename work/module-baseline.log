@@ -1,0 +1,77 @@
+mkdir -p "build/baseline"
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/convert.c -o build/baseline/convert.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/encoder.c -o build/baseline/encoder.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/font_data.c -o build/baseline/font_data.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/glyph.c -o build/baseline/glyph.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/layout.c -o build/baseline/layout.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/playback.c -o build/baseline/playback.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/render.c -o build/baseline/render.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/strbuf.c -o build/baseline/strbuf.o
+src/encoder.c: In function ‘vaapi_device_arg’:
+src/encoder.c:182:74: warning: ‘%s’ directive output may be truncated writing up to 255 bytes into a region of size 105 [-Wformat-truncation=]
+  182 |                                                  "-vaapi_device /dev/dri/%s",
+      |                                                                          ^~
+src/encoder.c:181:41: note: ‘snprintf’ output between 24 and 279 bytes into a destination of size 128
+  181 |                                         snprintf(buf, sizeof buf,
+      |                                         ^~~~~~~~~~~~~~~~~~~~~~~~~
+  182 |                                                  "-vaapi_device /dev/dri/%s",
+      |                                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  183 |                                                  e->d_name);
+      |                                                  ~~~~~~~~~~
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/terminal.c -o build/baseline/terminal.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui.c -o build/baseline/ui.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_config.c -o build/baseline/ui_config.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_home.c -o build/baseline/ui_home.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_picker.c -o build/baseline/ui_picker.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_progress.c -o build/baseline/ui_progress.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_terminal.c -o build/baseline/ui_terminal.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_text.c -o build/baseline/ui_text.o
+src/ui_progress.c: In function ‘miku_ui_convert’:
+src/ui_progress.c:227:37: warning: ‘%s’ directive output may be truncated writing up to 639 bytes into a region of size 240 [-Wformat-truncation=]
+  227 |                 snprintf(dst, cap, "%s", last);
+      |                                     ^~
+In function ‘ui_log_tail’,
+    inlined from ‘miku_ui_convert’ at src/ui_progress.c:271:4:
+src/ui_progress.c:227:17: note: ‘snprintf’ output between 1 and 640 bytes into a destination of size 240
+  227 |                 snprintf(dst, cap, "%s", last);
+      |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/util.c -o build/baseline/util.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/video.c -o build/baseline/video.o
+src/ui_picker.c: In function ‘miku_ui_pick_file’:
+src/ui_picker.c:129:42: warning: ‘snprintf’ output may be truncated before the last format character [-Wformat-truncation=]
+  129 |                 snprintf(dst, cap, "%s/%s", dir, name);
+      |                                          ^
+In function ‘ui_join’,
+    inlined from ‘ui_join’ at src/ui_picker.c:124:13,
+    inlined from ‘ui_pick_with_fzf’ at src/ui_picker.c:270:5,
+    inlined from ‘miku_ui_pick_file’ at src/ui_picker.c:328:17:
+src/ui_picker.c:129:17: note: ‘snprintf’ output 2 or more bytes (assuming 1025) into a destination of size 1024
+  129 |                 snprintf(dst, cap, "%s/%s", dir, name);
+      |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/ui_picker.c: In function ‘miku_ui_pick_file’:
+src/ui_picker.c:293:52: warning: ‘snprintf’ output may be truncated before the last format character [-Wformat-truncation=]
+  293 |         snprintf(dir_slash, sizeof dir_slash, "%s%s", dir,
+      |                                                    ^
+In function ‘ui_pick_with_dialog’,
+    inlined from ‘miku_ui_pick_file’ at src/ui_picker.c:337:17:
+src/ui_picker.c:293:9: note: ‘snprintf’ output between 1 and 1025 bytes into a destination of size 1024
+  293 |         snprintf(dir_slash, sizeof dir_slash, "%s%s", dir,
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  294 |                  dir[strlen(dir) - 1] == '/' ? "" : "/");
+      |                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/ui_picker.c: In function ‘miku_ui_pick_file’:
+src/ui_picker.c:129:40: warning: ‘%s’ directive output may be truncated writing up to 255 bytes into a region of size between 0 and 1023 [-Wformat-truncation=]
+  129 |                 snprintf(dst, cap, "%s/%s", dir, name);
+      |                                        ^~
+In function ‘ui_join’,
+    inlined from ‘ui_join’ at src/ui_picker.c:124:13,
+    inlined from ‘miku_ui_pick_file’ at src/ui_picker.c:498:6:
+src/ui_picker.c:129:17: note: ‘snprintf’ output between 2 and 1280 bytes into a destination of size 1024
+  129 |                 snprintf(dst, cap, "%s/%s", dir, name);
+      |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/audio.c -o build/baseline/audio.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/main.c -o build/baseline/main.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes  tests/playback.c build/baseline/convert.o build/baseline/encoder.o build/baseline/font_data.o build/baseline/glyph.o build/baseline/layout.o build/baseline/playback.o build/baseline/render.o build/baseline/strbuf.o build/baseline/terminal.o build/baseline/ui.o build/baseline/ui_config.o build/baseline/ui_home.o build/baseline/ui_picker.o build/baseline/ui_progress.o build/baseline/ui_terminal.o build/baseline/ui_text.o build/baseline/util.o build/baseline/video.o -lm -o build/baseline/playback-test
+cc  build/baseline/audio.o build/baseline/convert.o build/baseline/encoder.o build/baseline/font_data.o build/baseline/glyph.o build/baseline/layout.o build/baseline/main.o build/baseline/playback.o build/baseline/render.o build/baseline/strbuf.o build/baseline/terminal.o build/baseline/ui.o build/baseline/ui_config.o build/baseline/ui_home.o build/baseline/ui_picker.o build/baseline/ui_progress.o build/baseline/ui_terminal.o build/baseline/ui_text.o build/baseline/util.o build/baseline/video.o -lm -o build/baseline/miku
+timeout 5s build/baseline/playback-test
+playback IPC: PASS

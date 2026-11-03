@@ -1,0 +1,3 @@
+clang-format --dry-run --Werror src/*.c include/*.h tests/*.c
+.venv/bin/python tests/style.py
+function style: 184 checked

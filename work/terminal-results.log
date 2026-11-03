@@ -1,0 +1,9 @@
+TUI quit: exit=0, terminal restored
+TUI SIGINT: exit=0, terminal restored
+TUI SIGTERM: exit=0, terminal restored
+playback quit: exit=0, terminal restored
+playback SIGINT: exit=0, terminal restored
+playback SIGTERM: exit=0, terminal restored
+muted EOF: exit=0, terminal restored
+audio EOF: exit=0, terminal restored
+TUI playback twice: exit=0, terminal restored

@@ -1,0 +1,16 @@
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_directory.c -o build/manual/ui_directory.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_picker.c -o build/manual/ui_picker.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_picker_external.c -o build/manual/ui_picker_external.o
+src/ui_picker_external.c: In function ‘miku_ui_pick_with_dialog’:
+src/ui_picker_external.c:155:52: warning: ‘snprintf’ output may be truncated before the last format character [-Wformat-truncation=]
+  155 |         snprintf(dir_slash, sizeof dir_slash, "%s%s", dir,
+      |                                                    ^
+src/ui_picker_external.c:155:9: note: ‘snprintf’ output between 1 and 1025 bytes into a destination of size 1024
+  155 |         snprintf(dir_slash, sizeof dir_slash, "%s%s", dir,
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  156 |                  dir[strlen(dir) - 1] == '/' ? "" : "/");
+      |                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes  tests/playback.c build/manual/cli.o build/manual/convert.o build/manual/encoder.o build/manual/font_data.o build/manual/glyph.o build/manual/layout.o build/manual/playback.o build/manual/render.o build/manual/strbuf.o build/manual/terminal.o build/manual/terminal_frame.o build/manual/ui.o build/manual/ui_config.o build/manual/ui_directory.o build/manual/ui_home.o build/manual/ui_picker.o build/manual/ui_picker_external.o build/manual/ui_progress.o build/manual/ui_terminal.o build/manual/ui_text.o build/manual/util.o build/manual/video.o -lm -o build/manual/playback-test
+cc  build/manual/audio.o build/manual/cli.o build/manual/convert.o build/manual/encoder.o build/manual/font_data.o build/manual/glyph.o build/manual/layout.o build/manual/main.o build/manual/playback.o build/manual/render.o build/manual/strbuf.o build/manual/terminal.o build/manual/terminal_frame.o build/manual/ui.o build/manual/ui_config.o build/manual/ui_directory.o build/manual/ui_home.o build/manual/ui_picker.o build/manual/ui_picker_external.o build/manual/ui_progress.o build/manual/ui_terminal.o build/manual/ui_text.o build/manual/util.o build/manual/video.o -lm -o build/manual/miku
+timeout 5s build/manual/playback-test
+playback IPC: PASS

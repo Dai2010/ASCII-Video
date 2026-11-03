@@ -1,0 +1,11 @@
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -Wdeclaration-after-statement -Werror -MMD -MP -c src/ui_terminal.c -o build/ui_terminal.o
+cc  build/audio.o build/cli.o build/convert.o build/encoder.o build/font_data.o build/glyph.o build/layout.o build/main.o build/playback.o build/render.o build/strbuf.o build/terminal.o build/terminal_frame.o build/ui.o build/ui_config.o build/ui_directory.o build/ui_home.o build/ui_picker.o build/ui_picker_external.o build/ui_progress.o build/ui_terminal.o build/ui_text.o build/util.o build/video.o -lm -o build/miku
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -Wdeclaration-after-statement -Werror  tests/playback.c build/cli.o build/convert.o build/encoder.o build/font_data.o build/glyph.o build/layout.o build/playback.o build/render.o build/strbuf.o build/terminal.o build/terminal_frame.o build/ui.o build/ui_config.o build/ui_directory.o build/ui_home.o build/ui_picker.o build/ui_picker_external.o build/ui_progress.o build/ui_terminal.o build/ui_text.o build/util.o build/video.o -lm -o build/playback-test
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -Wdeclaration-after-statement -Werror  tests/render.c build/cli.o build/convert.o build/encoder.o build/font_data.o build/glyph.o build/layout.o build/playback.o build/render.o build/strbuf.o build/terminal.o build/terminal_frame.o build/ui.o build/ui_config.o build/ui_directory.o build/ui_home.o build/ui_picker.o build/ui_picker_external.o build/ui_progress.o build/ui_terminal.o build/ui_text.o build/util.o build/video.o \
+	build/audio.o -lm -o build/render-test
+timeout 5s build/playback-test
+playback IPC: PASS
+timeout 10s build/render-test
+render equivalence: PASS
+timeout 5s build/buffer-test
+buffer boundaries: PASS

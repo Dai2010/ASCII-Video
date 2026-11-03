@@ -1,0 +1,37 @@
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/cli.c -o build/manual/cli.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/convert.c -o build/manual/convert.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/encoder.c -o build/manual/encoder.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/font_data.c -o build/manual/font_data.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/glyph.c -o build/manual/glyph.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/layout.c -o build/manual/layout.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/playback.c -o build/manual/playback.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/render.c -o build/manual/render.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/strbuf.c -o build/manual/strbuf.o
+src/playback.c: In function ‘play_poll_key’:
+src/playback.c:82:25: error: ‘FD_ZERO’ undeclared (first use in this function)
+   82 |         fd_set *__arr = FD_ZERO;
+      |                         ^~~~~~~
+src/playback.c:82:25: note: ‘FD_ZERO’ is a function-like macro and might be used incorrectly
+src/playback.c:82:25: note: each undeclared identifier is reported only once for each function it appears in
+src/playback.c:83:9: error: ‘d’ undeclared (first use in this function)
+   83 |         d int __i;
+      |         ^
+src/playback.c:83:10: error: expected ‘;’ before ‘int’
+   83 |         d int __i;
+      |          ^~~~
+      |          ;
+src/playback.c:84:10: warning: statement with no effect [-Wunused-value]
+   84 |         (&fds);
+      |         ~^~~~~
+src/playback.c:82:17: warning: unused variable ‘__arr’ [-Wunused-variable]
+   82 |         fd_set *__arr = FD_ZERO;
+      |                 ^~~~~
+make: *** [Makefile:20: build/manual/playback.o] Error 1
+make: *** Waiting for unfinished jobs....
+src/encoder.c: In function ‘miku_cpu_cores’:
+src/encoder.c:124:27: warning: declaration of ‘n’ shadows a previous local [-Wshadow]
+  124 |                 const int n = atoi(env);
+      |                           ^
+src/encoder.c:120:14: note: shadowed declaration is here
+  120 |         long n;
+      |              ^

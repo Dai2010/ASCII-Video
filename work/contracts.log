@@ -1,0 +1,78 @@
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/cli.c -o build/manual/cli.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/convert.c -o build/manual/convert.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/encoder.c -o build/manual/encoder.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/font_data.c -o build/manual/font_data.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/glyph.c -o build/manual/glyph.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/layout.c -o build/manual/layout.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/playback.c -o build/manual/playback.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/render.c -o build/manual/render.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/strbuf.c -o build/manual/strbuf.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/terminal.c -o build/manual/terminal.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/terminal_frame.c -o build/manual/terminal_frame.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui.c -o build/manual/ui.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_config.c -o build/manual/ui_config.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_directory.c -o build/manual/ui_directory.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_home.c -o build/manual/ui_home.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_picker.c -o build/manual/ui_picker.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_picker_external.c -o build/manual/ui_picker_external.o
+src/ui_config.c: In function ‘ui_config_rows’:
+src/ui_config.c:229:77: warning: value computed is not used [-Wunused-value]
+  229 |                                 (miku_sb_addf(sb, UI_GOOD UI_BOLD "▶ 开始") ==
+      |                                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~
+  230 |                                  0);
+      |                                  ~~                                          
+src/ui_config.c:232:68: warning: value computed is not used [-Wunused-value]
+  232 |                                 (miku_sb_addf(sb, UI_DIM "▶ 开始") == 0);
+      |                                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~
+src/ui_config.c:251:52: warning: value computed is not used [-Wunused-value]
+  251 |                         (miku_sb_addf(sb, UI_BOLD) == 0);
+      |                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_progress.c -o build/manual/ui_progress.o
+src/ui_home.c: In function ‘ui_draw_logo’:
+src/ui_home.c:69:56: warning: value computed is not used [-Wunused-value]
+   69 |                                 (miku_sb_addf(sb, " ") == 0);
+      |                                 ~~~~~~~~~~~~~~~~~~~~~~~^~~~~
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_terminal.c -o build/manual/ui_terminal.o
+src/ui_picker.c: In function ‘picker_row’:
+src/ui_picker.c:79:44: warning: value computed is not used [-Wunused-value]
+   79 |                 (miku_sb_addf(buffer, "/") == 0);
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_text.c -o build/manual/ui_text.o
+src/ui_picker_external.c: In function ‘miku_ui_pick_with_dialog’:
+src/ui_picker_external.c:155:52: warning: ‘snprintf’ output may be truncated before the last format character [-Wformat-truncation=]
+  155 |         snprintf(dir_slash, sizeof dir_slash, "%s%s", dir,
+      |                                                    ^
+src/ui_picker_external.c:155:9: note: ‘snprintf’ output between 1 and 1025 bytes into a destination of size 1024
+  155 |         snprintf(dir_slash, sizeof dir_slash, "%s%s", dir,
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  156 |                  dir[strlen(dir) - 1] == '/' ? "" : "/");
+      |                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/util.c -o build/manual/util.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/video.c -o build/manual/video.o
+src/ui_progress.c: In function ‘ui_draw_progress’:
+src/ui_progress.c:92:66: warning: value computed is not used [-Wunused-value]
+   92 |                 (miku_sb_addf(&sb, "%s", i < filled ? "█" : "░") == 0);
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~
+src/ui_progress.c: In function ‘miku_ui_convert’:
+src/ui_progress.c:227:37: warning: ‘%s’ directive output may be truncated writing up to 639 bytes into a region of size 240 [-Wformat-truncation=]
+  227 |                 snprintf(dst, cap, "%s", last);
+      |                                     ^~
+In function ‘ui_log_tail’,
+    inlined from ‘miku_ui_convert’ at src/ui_progress.c:281:4:
+src/ui_progress.c:227:17: note: ‘snprintf’ output between 1 and 640 bytes into a destination of size 240
+  227 |                 snprintf(dst, cap, "%s", last);
+      |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/audio.c -o build/manual/audio.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/main.c -o build/manual/main.o
+src/ui_text.c: In function ‘miku_ui_add_text_tail’:
+src/ui_text.c:107:40: warning: value computed is not used [-Wunused-value]
+  107 |                 (miku_sb_addf(sb, "…") == 0);
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~^~~~~
+src/ui_text.c: In function ‘miku_ui_pad’:
+src/ui_text.c:120:40: warning: value computed is not used [-Wunused-value]
+  120 |                 (miku_sb_addf(sb, " ") == 0);
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~^~~~~
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes  tests/playback.c build/manual/cli.o build/manual/convert.o build/manual/encoder.o build/manual/font_data.o build/manual/glyph.o build/manual/layout.o build/manual/playback.o build/manual/render.o build/manual/strbuf.o build/manual/terminal.o build/manual/terminal_frame.o build/manual/ui.o build/manual/ui_config.o build/manual/ui_directory.o build/manual/ui_home.o build/manual/ui_picker.o build/manual/ui_picker_external.o build/manual/ui_progress.o build/manual/ui_terminal.o build/manual/ui_text.o build/manual/util.o build/manual/video.o -lm -o build/manual/playback-test
+cc  build/manual/audio.o build/manual/cli.o build/manual/convert.o build/manual/encoder.o build/manual/font_data.o build/manual/glyph.o build/manual/layout.o build/manual/main.o build/manual/playback.o build/manual/render.o build/manual/strbuf.o build/manual/terminal.o build/manual/terminal_frame.o build/manual/ui.o build/manual/ui_config.o build/manual/ui_directory.o build/manual/ui_home.o build/manual/ui_picker.o build/manual/ui_picker_external.o build/manual/ui_progress.o build/manual/ui_terminal.o build/manual/ui_text.o build/manual/util.o build/manual/video.o -lm -o build/manual/miku
+timeout 5s build/manual/playback-test
+playback IPC: PASS

@@ -21,7 +21,7 @@
  *               426 -> 6x12 像素/字符，字符更多更细（426 x 120 个字符），左右各留 2 像素黑边
  *               数值越大画面越细腻，但单个字符越小、越不容易看清
  *
- * 作者: LinusTrevian（你猜我在线不）+ Claude Opus 5.5 Medium + GPT 4
+ *
  *
  * 为什么不使用 OpenCV：
  *   OpenCV 4 已经移除了 C 语言接口，只剩 C++ 接口，所以 C 版本改用 ffmpeg：
@@ -48,6 +48,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <math.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -2185,6 +2186,7 @@ static int start_audio(const char *input, const char *ipc_sock)
     if (command_exists("mpv")) {
         player = "mpv";
         args[n++] = "mpv";
+        args[n++] = "--no-config";
         args[n++] = "--no-video";
         args[n++] = "--really-quiet";
         args[n++] = "--no-terminal";
@@ -2263,54 +2265,88 @@ static int audio_ipc_open(void)
     return 1;
 }
 
+/* 单个在途请求及分行缓存，均由播放线程独占。 */
+static int g_audio_pending;
+static double g_audio_sent;
+static char g_audio_reply[4096];
+static size_t g_audio_reply_len;
+
+/* 只接受匹配请求的数值回复；事件、null 和错误回复不参与校时。 */
+static double audio_parse_position(char *line)
+{
+    char *id = strstr(line, "\"request_id\"");
+    char *data = strstr(line, "\"data\"");
+    char *end;
+    double pos;
+
+    if (!id || !(id = strchr(id, ':')) || strtol(id + 1, NULL, 10) != 1)
+        return -1.0;
+    g_audio_pending = 0;
+    if (!data || !(data = strchr(data, ':')))
+        return -1.0;
+    pos = strtod(data + 1, &end);
+    if (end == data + 1 || !isfinite(pos) || pos < 0.0)
+        return -1.0;
+    /* 把采样时刻外推到当前时刻，减小查询往返带来的误差。 */
+    return pos + (now_seconds() - g_audio_sent) * 0.5;
+}
+
+/* 非阻塞取样：没有完整回复就返回 -1，绝不等待音频进程。 */
 static double audio_time_pos(void)
 {
-    if (!audio_ipc_open()) {
+    const char *req =
+        "{\"command\":[\"get_property\",\"time-pos\"],\"request_id\":1}\n";
+    double pos = -1.0;
+    ssize_t n;
+    char *line;
+
+    if (!audio_ipc_open())
         return -1.0;
+    n = recv(g_audio_ipc, g_audio_reply + g_audio_reply_len,
+             sizeof g_audio_reply - 1 - g_audio_reply_len, MSG_DONTWAIT);
+    if (n > 0) {
+        g_audio_reply_len += (size_t)n;
+        g_audio_reply[g_audio_reply_len] = '\0';
+        while ((line = strchr(g_audio_reply, '\n')) != NULL) {
+            *line = '\0';
+            const double sample = audio_parse_position(g_audio_reply);
+            if (sample >= 0.0)
+                pos = sample;
+            const size_t used = (size_t)(line - g_audio_reply) + 1;
+            g_audio_reply_len -= used;
+            memmove(g_audio_reply, line + 1, g_audio_reply_len + 1);
+        }
     }
-    const char *req = "{\"command\":[\"get_property\",\"time-pos\"]}\n";
-    if (write(g_audio_ipc, req, strlen(req)) != (ssize_t)strlen(req)) {
+    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+                   errno != EINTR) ||
+        g_audio_reply_len == sizeof g_audio_reply - 1 ||
+        (g_audio_pending && now_seconds() - g_audio_sent > 0.5)) {
         close(g_audio_ipc);
         g_audio_ipc = -1;
+        g_audio_pending = 0;
+        g_audio_reply_len = 0;
         return -1.0;
     }
-    char buf[512];
-    size_t len = 0;
-    const double deadline = now_seconds() + 0.08;
-    while (len + 1 < sizeof buf && now_seconds() < deadline) {
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(g_audio_ipc, &fds);
-        struct timeval tv = {0, 20000};
-        if (select(g_audio_ipc + 1, &fds, NULL, NULL, &tv) <= 0) {
-            continue;
-        }
-        const ssize_t n = read(g_audio_ipc, buf + len, sizeof buf - 1 - len);
-        if (n <= 0) {
+    /* 每 50 毫秒最多一个请求，不积压查询。 */
+    if (!g_audio_pending && now_seconds() - g_audio_sent >= 0.05) {
+        n = send(g_audio_ipc, req, strlen(req), MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (n != (ssize_t)strlen(req)) {
             close(g_audio_ipc);
             g_audio_ipc = -1;
-            return -1.0;
+            g_audio_reply_len = 0;
+            return pos;
         }
-        len += (size_t)n;
-        buf[len] = '\0';
-        if (strchr(buf, '\n')) {
-            break;
-        }
+        g_audio_pending = 1;
+        g_audio_sent = now_seconds();
     }
-    buf[len] = '\0';
-    const char *p = strstr(buf, "\"data\"");
-    if (!p) {
-        return -1.0;
-    }
-    p = strchr(p, ':');
-    if (!p) {
-        return -1.0;
-    }
-    return strtod(p + 1, NULL);
+    return pos;
 }
 
 static void audio_ipc_close(void)
 {
+    g_audio_pending = 0;
+    g_audio_reply_len = 0;
+    g_audio_sent = 0.0;
     if (g_audio_ipc >= 0) {
         close(g_audio_ipc);
         g_audio_ipc = -1;
@@ -2449,6 +2485,7 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
         goto cleanup;
     }
 
+    g_play_stop = 0;
     signal(SIGINT, play_on_signal);
     signal(SIGTERM, play_on_signal);
     play_raw_mode();
@@ -2469,9 +2506,9 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
      * 若仍从 fork 的时刻算，开头就会声画差一拍。拿不到位置就退回 fork 时刻。
      */
     double origin = now_seconds();
-    if (audio) {
+    if (audio && command_exists("mpv")) {
         /* mpv 在真正出声前也会把 time-pos 报成 0，所以要等它确实走动起来再对表 */
-        for (int i = 0; i < 80; ++i) { /* 最多等 4 秒 */
+        for (int i = 0; i < 80 && !g_play_stop; ++i) { /* 最多等 4 秒 */
             const double ap = audio_time_pos();
             if (ap >= 0.12) {
                 origin = now_seconds() - ap;
@@ -2485,6 +2522,19 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
     int quit = 0;
 
     while (!g_play_stop && fread(cells, 1, cell_bytes, dec) == cell_bytes) {
+        if (audio) {
+            const double ap = audio_time_pos();
+            if (ap >= 0.0)
+                origin = now_seconds() - ap;
+        }
+        /* 过期帧只解码不渲染，避免终端吞吐不足时积累延迟。 */
+        if ((double)(frame + 1) / play_fps < now_seconds() - origin) {
+            ++frame;
+            if (play_poll_key() == 'q') {
+                break;
+            }
+            continue;
+        }
         sb.len = 0;
         if (!sb_addf(&sb, "\x1b[H")) {
             break;
@@ -2559,6 +2609,8 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
         if (quit) {
             break;
         }
+        /* 帧编号代表当前帧的显示时间，先等待再输出。 */
+        sleep_until(origin + (double)frame / play_fps);
         fwrite(sb.buf, 1, sb.len, stdout);
         fflush(stdout);
 
@@ -2570,24 +2622,7 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
             break;
         }
 
-        /* 对音频时钟：开头每 5 帧校一次快速收敛，之后每 15 帧一次 */
-        if (audio && (frame % (frame < 50 ? 5 : 15)) == 0) {
-            const double ap = audio_time_pos();
-            if (ap >= 0.0) {
-                const double drift = (double)frame / play_fps - ap;
-                if (getenv("MIKU_DEBUG_SYNC")) {
-                    fprintf(stderr, "sync t=%.2f audio=%.2f drift=%+.3f\n",
-                            (double)frame / play_fps, ap, drift);
-                }
-                /* 按漂移量收敛：差得大就一次拉回，差得小就半量追，避免来回抖 */
-                if (drift > 0.5 || drift < -0.5) {
-                    origin += drift; /* 大偏差直接对齐 */
-                } else if (drift > 0.05 || drift < -0.05) {
-                    origin += drift * 0.5;
-                }
-            }
-        }
-        sleep_until(origin + (double)frame / play_fps);
+
     }
 
     fputs("\x1b[0m\r\n", stdout);
@@ -2598,6 +2633,7 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
     if (sock[0]) {
         remove(sock);
     }
+    play_restore_term();
     ret = 1;
 
 cleanup:

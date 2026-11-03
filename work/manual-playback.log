@@ -1,0 +1,78 @@
+mkdir -p "build/manual"
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/convert.c -o build/manual/convert.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/encoder.c -o build/manual/encoder.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/font_data.c -o build/manual/font_data.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/glyph.c -o build/manual/glyph.o
+src/encoder.c: In function ‘vaapi_device_arg’:
+src/encoder.c:182:74: warning: ‘%s’ directive output may be truncated writing up to 255 bytes into a region of size 105 [-Wformat-truncation=]
+  182 |                                                  "-vaapi_device /dev/dri/%s",
+      |                                                                          ^~
+src/encoder.c:181:41: note: ‘snprintf’ output between 24 and 279 bytes into a destination of size 128
+  181 |                                         snprintf(buf, sizeof buf,
+      |                                         ^~~~~~~~~~~~~~~~~~~~~~~~~
+  182 |                                                  "-vaapi_device /dev/dri/%s",
+      |                                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  183 |                                                  e->d_name);
+      |                                                  ~~~~~~~~~~
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/layout.c -o build/manual/layout.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/playback.c -o build/manual/playback.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/render.c -o build/manual/render.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/strbuf.c -o build/manual/strbuf.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/terminal.c -o build/manual/terminal.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/terminal_frame.c -o build/manual/terminal_frame.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui.c -o build/manual/ui.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_config.c -o build/manual/ui_config.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_home.c -o build/manual/ui_home.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_picker.c -o build/manual/ui_picker.o
+src/ui_picker.c: In function ‘miku_ui_pick_file’:
+src/ui_picker.c:129:42: warning: ‘snprintf’ output may be truncated before the last format character [-Wformat-truncation=]
+  129 |                 snprintf(dst, cap, "%s/%s", dir, name);
+      |                                          ^
+In function ‘ui_join’,
+    inlined from ‘ui_join’ at src/ui_picker.c:124:13,
+    inlined from ‘ui_pick_with_fzf’ at src/ui_picker.c:270:5,
+    inlined from ‘miku_ui_pick_file’ at src/ui_picker.c:328:17:
+src/ui_picker.c:129:17: note: ‘snprintf’ output 2 or more bytes (assuming 1025) into a destination of size 1024
+  129 |                 snprintf(dst, cap, "%s/%s", dir, name);
+      |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/ui_picker.c: In function ‘miku_ui_pick_file’:
+src/ui_picker.c:293:52: warning: ‘snprintf’ output may be truncated before the last format character [-Wformat-truncation=]
+  293 |         snprintf(dir_slash, sizeof dir_slash, "%s%s", dir,
+      |                                                    ^
+In function ‘ui_pick_with_dialog’,
+    inlined from ‘miku_ui_pick_file’ at src/ui_picker.c:337:17:
+src/ui_picker.c:293:9: note: ‘snprintf’ output between 1 and 1025 bytes into a destination of size 1024
+  293 |         snprintf(dir_slash, sizeof dir_slash, "%s%s", dir,
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  294 |                  dir[strlen(dir) - 1] == '/' ? "" : "/");
+      |                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/ui_picker.c: In function ‘miku_ui_pick_file’:
+src/ui_picker.c:129:40: warning: ‘%s’ directive output may be truncated writing up to 255 bytes into a region of size between 0 and 1023 [-Wformat-truncation=]
+  129 |                 snprintf(dst, cap, "%s/%s", dir, name);
+      |                                        ^~
+In function ‘ui_join’,
+    inlined from ‘ui_join’ at src/ui_picker.c:124:13,
+    inlined from ‘miku_ui_pick_file’ at src/ui_picker.c:498:6:
+src/ui_picker.c:129:17: note: ‘snprintf’ output between 2 and 1280 bytes into a destination of size 1024
+  129 |                 snprintf(dst, cap, "%s/%s", dir, name);
+      |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_progress.c -o build/manual/ui_progress.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_terminal.c -o build/manual/ui_terminal.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/ui_text.c -o build/manual/ui_text.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/util.c -o build/manual/util.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/video.c -o build/manual/video.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/audio.c -o build/manual/audio.o
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -MMD -MP -c src/main.c -o build/manual/main.o
+src/ui_progress.c: In function ‘miku_ui_convert’:
+src/ui_progress.c:227:37: warning: ‘%s’ directive output may be truncated writing up to 639 bytes into a region of size 240 [-Wformat-truncation=]
+  227 |                 snprintf(dst, cap, "%s", last);
+      |                                     ^~
+In function ‘ui_log_tail’,
+    inlined from ‘miku_ui_convert’ at src/ui_progress.c:271:4:
+src/ui_progress.c:227:17: note: ‘snprintf’ output between 1 and 640 bytes into a destination of size 240
+  227 |                 snprintf(dst, cap, "%s", last);
+      |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes  tests/playback.c build/manual/convert.o build/manual/encoder.o build/manual/font_data.o build/manual/glyph.o build/manual/layout.o build/manual/playback.o build/manual/render.o build/manual/strbuf.o build/manual/terminal.o build/manual/terminal_frame.o build/manual/ui.o build/manual/ui_config.o build/manual/ui_home.o build/manual/ui_picker.o build/manual/ui_progress.o build/manual/ui_terminal.o build/manual/ui_text.o build/manual/util.o build/manual/video.o -lm -o build/manual/playback-test
+cc  build/manual/audio.o build/manual/convert.o build/manual/encoder.o build/manual/font_data.o build/manual/glyph.o build/manual/layout.o build/manual/main.o build/manual/playback.o build/manual/render.o build/manual/strbuf.o build/manual/terminal.o build/manual/terminal_frame.o build/manual/ui.o build/manual/ui_config.o build/manual/ui_home.o build/manual/ui_picker.o build/manual/ui_progress.o build/manual/ui_terminal.o build/manual/ui_text.o build/manual/util.o build/manual/video.o -lm -o build/manual/miku
+timeout 5s build/manual/playback-test
+playback IPC: PASS
