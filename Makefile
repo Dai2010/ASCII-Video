@@ -34,7 +34,7 @@ DEPENDS     := $(OBJECTS:.o=.d)
 LIB_OBJECTS := $(filter-out $(BUILD_DIR)/main.o $(BUILD_DIR)/audio.o,$(OBJECTS))
 PROGRAM     := $(BUILD_DIR)/miku
 TESTS       := $(BUILD_DIR)/playback-test $(BUILD_DIR)/render-test \
-	       $(BUILD_DIR)/buffer-test
+	       $(BUILD_DIR)/buffer-test $(BUILD_DIR)/video-test
 # 测试超时保护：有 timeout（或 macOS 上的 gtimeout）就用，没有则直接运行
 TIMEOUT := $(firstword $(shell command -v timeout gtimeout 2>/dev/null))
 
@@ -65,10 +65,16 @@ $(BUILD_DIR)/render-test: tests/render.c $(LIB_OBJECTS) $(BUILD_DIR)/audio.o \
 $(BUILD_DIR)/buffer-test: tests/buffer.c $(BUILD_DIR)/strbuf.o | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(OPT) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
+$(BUILD_DIR)/video-test: tests/video.c $(LIB_OBJECTS) $(BUILD_DIR)/audio.o \
+		| $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OPT) $(LDFLAGS) $< $(LIB_OBJECTS) \
+		$(BUILD_DIR)/audio.o $(LDLIBS) -o $@
+
 test: $(TESTS)
 	$(if $(TIMEOUT),$(TIMEOUT) 5s) $(BUILD_DIR)/playback-test
 	$(if $(TIMEOUT),$(TIMEOUT) 10s) $(BUILD_DIR)/render-test
 	$(if $(TIMEOUT),$(TIMEOUT) 5s) $(BUILD_DIR)/buffer-test
+	$(PYTHON) tests/video.py $(BUILD_DIR)/video-test
 
 # 格式检查需要 clang-format；Python 脚本检查本项目的额外风格规则
 format-check:

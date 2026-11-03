@@ -147,7 +147,10 @@ static void ui_draw_progress(const struct ui_progress *pg)
 	miku_sb_addf(&sb, UI_GOOD);
 	for (i = 0; i < bar_w; ++i)
 		miku_sb_addf(&sb, "%s", i < filled ? "█" : "░");
-	miku_sb_addf(&sb, UI_RESET " %5.1f%%", frac * 100.0);
+	if (pg->total > 0)
+		miku_sb_addf(&sb, UI_RESET " %5.1f%%", frac * 100.0);
+	else
+		miku_sb_addf(&sb, UI_RESET " 进度未知");
 
 	miku_ui_row(&sb, 7);
 	if (pg->total > 0) {

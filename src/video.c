@@ -212,7 +212,8 @@ static void probe_line(char *line, struct video_info *info,
 		parse_rate(value, &metadata->rate_num, &metadata->rate_den);
 	else if (strcmp(line, "nb_frames") == 0)
 		info->total_frames = atol(value);
-	else if (strcmp(line, "duration") == 0)
+	/* 优先保留视频流时长，随后输出的容器时长仅补缺失值。 */
+	else if (strcmp(line, "duration") == 0 && metadata->duration <= 0)
 		metadata->duration = atof(value);
 	else if (strcmp(line, "rotation") == 0 ||
 		 strcmp(line, "TAG:rotate") == 0)
@@ -277,7 +278,7 @@ int miku_probe_video(const char *path, struct video_info *info)
 	if (!quoted)
 		return -EIO;
 	command = miku_xasprintf(
-		"ffprobe -v error -select_streams v:0 -show_entries stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration:stream_side_data=rotation:stream_tags=rotate -of default=noprint_wrappers=1 %s 2>/dev/null",
+		"ffprobe -v error -select_streams v:0 -show_entries stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration:stream_side_data=rotation:stream_tags=rotate:format=duration -of default=noprint_wrappers=1 %s 2>/dev/null",
 		quoted);
 	free(quoted);
 	if (!command)
