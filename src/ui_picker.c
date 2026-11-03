@@ -25,11 +25,11 @@
 /* list 由扫描分配；visible 保存过滤后的下标，两者都由选择器释放。 */
 struct picker_state {
 	char directory[1024];
-	char filter[128];	   /* 常驻输入栏内容，空串表示不过滤。 */
+	char filter[128]; /* 常驻输入栏内容，空串表示不过滤。 */
 	struct directory_entry *list;
-	int *visible;		   /* 过滤后可见记录在 list 中的下标。 */
+	int *visible; /* 过滤后可见记录在 list 中的下标。 */
 	int count;
-	int shown;		   /* 过滤后可见记录数。 */
+	int shown; /* 过滤后可见记录数。 */
 	int selected;
 	int top;
 	int columns;
@@ -116,8 +116,7 @@ static void picker_reload(struct picker_state *state)
 	if (miku_ui_load_dir(state->directory, &state->list, &state->count) !=
 	    0) {
 		snprintf(state->directory, sizeof(state->directory), ".");
-		miku_ui_load_dir(state->directory, &state->list,
-				 &state->count);
+		miku_ui_load_dir(state->directory, &state->list, &state->count);
 	}
 	state->visible = calloc(state->count > 0 ? (size_t)state->count : 1,
 				sizeof(int));
@@ -227,10 +226,10 @@ static void picker_draw(struct picker_state *state)
 	miku_ui_clear_screen();
 	miku_sb_addf(&buffer, "\x1b[H");
 	miku_ui_row(&buffer, 1);
-	miku_sb_addf(&buffer, UI_BOLD UI_ACCENT
-		     "选择视频" UI_RESET UI_DIM
-		     "  Enter 打开/选定  ← 返回上级  点行即选  Esc 清空"
-		     UI_RESET);
+	miku_sb_addf(
+		&buffer, UI_BOLD UI_ACCENT
+		"选择视频" UI_RESET UI_DIM
+		"  Enter 打开/选定  ← 返回上级  点行即选  Esc 清空" UI_RESET);
 	miku_ui_row(&buffer, 2);
 	miku_sb_addf(&buffer, UI_DIM);
 	miku_ui_add_text_tail(&buffer, state->directory, state->columns - 1);
@@ -246,15 +245,16 @@ static void picker_draw(struct picker_state *state)
 				 state->columns - 4);
 	}
 	miku_sb_addf(&buffer, "\x1b[7m \x1b[0m");
-	for (i = state->top;
-	     i < state->shown && i < state->top + state->window; i++)
+	for (i = state->top; i < state->shown && i < state->top + state->window;
+	     i++)
 		picker_row(&buffer, state, i);
 	if (!state->shown) {
 		miku_ui_row(&buffer, 4);
 		miku_sb_addf(&buffer, UI_DIM);
 		miku_ui_add_text(&buffer,
-				 state->count ? "（没有匹配的项）"
-					      : "（这个目录里没有子目录或视频文件）",
+				 state->count
+					 ? "（没有匹配的项）"
+					 : "（这个目录里没有子目录或视频文件）",
 				 state->columns - 1);
 		miku_sb_addf(&buffer, UI_RESET);
 	}
@@ -349,19 +349,87 @@ static int picker_try_path(struct picker_state *state, char *out,
 		full[--length] = '\0';
 	if (stat(full, &info) != 0) {
 		if (getenv("MIKU_DEBUG_PICK"))
-			fprintf(stderr, "\r\ntry_path %s: stat 失败 errno=%d\r\n",
-				full, errno);
+			fprintf(stderr,
+				"\r\ntry_path %s: stat 失败 errno=%d\r\n", full,
+				errno);
 		return 0;
 	}
 	if (S_ISDIR(info.st_mode)) {
-		snprintf(state->directory, sizeof state->directory, "%s",
-			 full);
+		snprintf(state->directory, sizeof state->directory, "%s", full);
 		state->filter[0] = '\0';
 		picker_reload(state);
 		return 2;
 	}
 	snprintf(out, capacity, "%s", full);
 	return miku_ui_accept_path(out, capacity) ? 1 : 0;
+}
+
+/*
+ * picker_activate - 回车：先把输入栏当路径解析（目录就进入、文件就选定），
+ * 解析不到才按当前高亮条目打开目录或选定文件。
+ *
+ * @state: 调用方持有的当前界面状态。
+ * @out: 调用方提供的结果地址，不转移其所有权。
+ * @capacity: 输出数组容量，单位字节，包含结尾 NUL 空间。
+ * @length: 调用方持有的输入栏字节数，切换目录后归零。
+ *
+ * 返回：1 已选定可读文件，0 继续浏览，-1 选定但不可读。
+ *
+ */
+static int picker_activate(struct picker_state *state, char *out,
+			   size_t capacity, size_t *length)
+{
+	const struct directory_entry *entry;
+	int acted = picker_try_path(state, out, capacity);
+
+	if (acted == 2) {
+		*length = 0;
+		return 0;
+	}
+	if (acted == 1)
+		return 1;
+	if (!state->shown)
+		return 0;
+	entry = &state->list[state->visible[state->selected]];
+	if (entry->is_dir) {
+		miku_ui_descend(state->directory, sizeof(state->directory),
+				entry->name);
+		state->filter[0] = '\0';
+		*length = 0;
+		picker_reload(state);
+		return 0;
+	}
+	miku_ui_join(out, capacity, state->directory, entry->name);
+	return miku_ui_accept_path(out, capacity) ? 1 : -1;
+}
+
+/*
+ * picker_type - 把文本键追加进输入栏并重算过滤；命令键与控制字符返回 0，
+ * 交给调用方处理。
+ *
+ * @state: 调用方持有的当前界面状态。
+ * @key: 已解码的 UI 键值或普通输入字节。
+ * @length: 调用方持有的输入栏字节数。
+ *
+ */
+static int picker_type(struct picker_state *state, int key, size_t *length)
+{
+	if (key >= UI_UP && key <= UI_IGNORE)
+		return 1;
+	if (key >= UI_TEXT_BYTE) {
+		if (*length + 1 >= sizeof state->filter)
+			return 1;
+		state->filter[(*length)++] = (char)(key - UI_TEXT_BYTE);
+	} else if (key >= 32 && key < 127) {
+		if (*length + 1 >= sizeof state->filter)
+			return 1;
+		state->filter[(*length)++] = (char)key;
+	} else {
+		return 0;
+	}
+	state->filter[*length] = '\0';
+	picker_apply_filter(state);
+	return 1;
 }
 
 /*
@@ -376,7 +444,6 @@ static int picker_try_path(struct picker_state *state, char *out,
 static int picker_builtin(char *out, size_t capacity, const char *start)
 {
 	struct picker_state state = {0};
-	const struct directory_entry *entry;
 	size_t length = 0;
 	int key;
 	int slot;
@@ -401,40 +468,16 @@ static int picker_builtin(char *out, size_t capacity, const char *start)
 		}
 		if (key == UI_CLICK) {
 			slot = state.top + miku_g_ui_my - 4;
-			if (miku_g_ui_my < 4 || slot < 0 ||
-			    slot >= state.shown)
+			if (miku_g_ui_my < 4 || slot < 0 || slot >= state.shown)
 				continue;
 			state.selected = slot;
 			key = '\r';
 		}
 		if (key == '\r' || key == '\n') {
-			int acted = picker_try_path(&state, out, capacity);
-
-			/* 已经切到目标目录就停下，等下一次按键再选文件。 */
-			if (acted == 2) {
-				length = 0;
-				continue;
-			}
-			if (acted == 1) {
-				ret = 1;
+			ret = picker_activate(&state, out, capacity, &length);
+			if (ret)
 				break;
-			}
-			if (!state.shown)
-				continue;
-			entry = &state.list[state.visible[state.selected]];
-			if (entry->is_dir) {
-				miku_ui_descend(state.directory,
-						sizeof(state.directory),
-						entry->name);
-				state.filter[0] = '\0';
-				length = 0;
-				picker_reload(&state);
-				continue;
-			}
-			miku_ui_join(out, capacity, state.directory,
-				     entry->name);
-			ret = miku_ui_accept_path(out, capacity) ? 1 : -1;
-			break;
+			continue;
 		}
 		if (key == 127) {
 			picker_delete_char(state.filter, &length);
@@ -443,23 +486,7 @@ static int picker_builtin(char *out, size_t capacity, const char *start)
 		}
 		if (picker_navigation(&state, key))
 			continue;
-		/* 方向键、滚轮、点击是命令键，不写进输入栏。 */
-		if (key >= UI_UP && key <= UI_IGNORE)
-			continue;
-		if (key >= UI_TEXT_BYTE) {
-			if (length + 1 < sizeof state.filter) {
-				state.filter[length++] =
-					(char)(key - UI_TEXT_BYTE);
-				state.filter[length] = '\0';
-				picker_apply_filter(&state);
-			}
-			continue;
-		}
-		if (key >= 32 && key < 127 && length + 1 < sizeof state.filter) {
-			state.filter[length++] = (char)key;
-			state.filter[length] = '\0';
-			picker_apply_filter(&state);
-		}
+		picker_type(&state, key, &length);
 	}
 	free(state.list);
 	free(state.visible);
@@ -482,8 +509,7 @@ int miku_ui_pick_file(char *out, size_t capacity, const char *start)
 	const char *prefer = getenv("MIKU_PICKER");
 	int ret = 0;
 
-	if (prefer && strcmp(prefer, "fzf") == 0 &&
-	    miku_command_exists("fzf"))
+	if (prefer && strcmp(prefer, "fzf") == 0 && miku_command_exists("fzf"))
 		ret = miku_ui_pick_with_fzf(out, capacity, start);
 	else if (prefer && strcmp(prefer, "dialog") == 0 &&
 		 miku_command_exists("dialog"))

@@ -232,8 +232,8 @@ static int fzf_select(const char *dir, char *chosen, size_t capacity,
 		miku_ui_leave();
 		status = system(command);
 		miku_ui_enter();
-		ret = status == 0 &&
-			      fzf_read(result, query, qcap, chosen, capacity)
+		ret = status == 0 && fzf_read(result, query, qcap, chosen,
+					      capacity)
 			      ? 1
 			      : -1;
 	}

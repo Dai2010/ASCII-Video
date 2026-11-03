@@ -190,8 +190,8 @@ void miku_ui_edit_field(struct ui_config *st, int which, const char *title)
 			ui_delete_character(buf, &len);
 			continue;
 		}
-		/* 方向键、滚轮与点击是命令键（1001..1008），不是文本；当成 UTF-8
-		 * 字节会把半个序列塞进路径，显示成乱码。 */
+		/* 方向键、滚轮与点击是命令键（1001..1008），不是文本；当成
+		 * UTF-8 字节会把半个序列塞进路径，显示成乱码。 */
 		if (k >= UI_UP && k <= UI_IGNORE)
 			continue;
 		if (k >= UI_TEXT_BYTE) {
@@ -453,8 +453,8 @@ void miku_ui_cfg_adjust(struct ui_config *st, int item, int dir)
 		st->style = !st->style;
 		/* 自动派生的输出名跟着风格换后缀，两种风格才各有各的文件。 */
 		if (st->output_auto && st->input[0])
-			miku_ui_derive_output(st->input, st->style,
-					      st->output, sizeof st->output);
+			miku_ui_derive_output(st->input, st->style, st->output,
+					      sizeof st->output);
 		break;
 	case CFG_RATIO:
 		st->ratio = (st->ratio + dir + RATIO_COUNT) % RATIO_COUNT;
