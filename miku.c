@@ -4402,12 +4402,18 @@ static int ui_config_screen(Config *st, int kind)
 
 static int tui_main(void)
 {
-    Config st;
-    memset(&st, 0, sizeof st);
-    st.style = STYLE_CHAR;
-    st.quality = 1; /* 默认原画分辨率；要降级再选 auto/high/mid/low */
-    if (access("miku.mp4", R_OK) == 0) {
-        snprintf(st.input, sizeof st.input, "miku.mp4");
+    /*
+     * 转换与播放各用一份配置：从播放切到转换时，刚才播过的文件不会漏到转换页里，
+     * 免得一进来点「开始」就把刚看的内容又转一遍。两份都只做同样的初始默认值。
+     */
+    Config st[2];
+    memset(st, 0, sizeof st);
+    for (int i = 0; i < 2; ++i) {
+        st[i].style = STYLE_CHAR;
+        st[i].quality = 1; /* 默认原画分辨率；要降级再选 auto/high/mid/low */
+        if (access("miku.mp4", R_OK) == 0) {
+            snprintf(st[i].input, sizeof st[i].input, "miku.mp4");
+        }
     }
     srand((unsigned)time(NULL) ^ (unsigned)getpid());
 
@@ -4419,7 +4425,7 @@ static int tui_main(void)
         if (choice == 2 || g_ui_stop) {
             break;
         }
-        if (ui_config_screen(&st, choice) == 1) {
+        if (ui_config_screen(&st[choice], choice) == 1) {
             break;
         }
     }
