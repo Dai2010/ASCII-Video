@@ -56,6 +56,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -2167,11 +2169,12 @@ static pid_t g_audio_pid = -1;
  * 低配设备上真正吃 CPU 的是往终端刷字符，音频解码只占个位数百分比；
  * 真跟不上就 --mute 或降低播放帧率。
  */
-static int start_audio(const char *input)
+static int start_audio(const char *input, const char *ipc_sock)
 {
     const char *player = NULL;
-    const char *args[8];
+    const char *args[12];
     int n = 0;
+    static char ipc_arg[300];
 
     if (command_exists("mpv")) {
         player = "mpv";
@@ -2179,6 +2182,10 @@ static int start_audio(const char *input)
         args[n++] = "--no-video";
         args[n++] = "--really-quiet";
         args[n++] = "--no-terminal";
+        if (ipc_sock && *ipc_sock) { /* 有了它才能问到音频播到第几秒 */
+            snprintf(ipc_arg, sizeof ipc_arg, "--input-ipc-server=%s", ipc_sock);
+            args[n++] = ipc_arg;
+        }
         args[n++] = "--";
         args[n++] = input;
     } else if (command_exists("ffplay")) {
@@ -2222,7 +2229,89 @@ static void stop_audio(void)
     }
 }
 
-/* 按字节数扩容的缓冲区 */
+/* mpv 的 IPC：问一次音频当前播到第几秒；拿不到返回 -1 */
+static int g_audio_ipc = -1;
+static char g_audio_sock[256];
+
+static int audio_ipc_open(void)
+{
+    if (g_audio_ipc >= 0) {
+        return 1;
+    }
+    struct sockaddr_un addr;
+    if (g_audio_sock[0] == '\0' || strlen(g_audio_sock) >= sizeof addr.sun_path) {
+        return 0;
+    }
+    const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return 0;
+    }
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof addr.sun_path, "%s", g_audio_sock);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) {
+        close(fd);
+        return 0;
+    }
+    g_audio_ipc = fd;
+    return 1;
+}
+
+static double audio_time_pos(void)
+{
+    if (!audio_ipc_open()) {
+        return -1.0;
+    }
+    const char *req = "{\"command\":[\"get_property\",\"time-pos\"]}\n";
+    if (write(g_audio_ipc, req, strlen(req)) != (ssize_t)strlen(req)) {
+        close(g_audio_ipc);
+        g_audio_ipc = -1;
+        return -1.0;
+    }
+    char buf[512];
+    size_t len = 0;
+    const double deadline = now_seconds() + 0.08;
+    while (len + 1 < sizeof buf && now_seconds() < deadline) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(g_audio_ipc, &fds);
+        struct timeval tv = {0, 20000};
+        if (select(g_audio_ipc + 1, &fds, NULL, NULL, &tv) <= 0) {
+            continue;
+        }
+        const ssize_t n = read(g_audio_ipc, buf + len, sizeof buf - 1 - len);
+        if (n <= 0) {
+            close(g_audio_ipc);
+            g_audio_ipc = -1;
+            return -1.0;
+        }
+        len += (size_t)n;
+        buf[len] = '\0';
+        if (strchr(buf, '\n')) {
+            break;
+        }
+    }
+    buf[len] = '\0';
+    const char *p = strstr(buf, "\"data\"");
+    if (!p) {
+        return -1.0;
+    }
+    p = strchr(p, ':');
+    if (!p) {
+        return -1.0;
+    }
+    return strtod(p + 1, NULL);
+}
+
+static void audio_ipc_close(void)
+{
+    if (g_audio_ipc >= 0) {
+        close(g_audio_ipc);
+        g_audio_ipc = -1;
+    }
+}
+
+/* 按字节数扩容的缓冲区 *//* 按字节数扩容的缓冲区 */
 typedef struct {
     char *buf;
     size_t len;
@@ -2284,18 +2373,53 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
         return 0;
     }
 
-    /* 网格：列宽按参数，行数按视频宽高比；终端放不下就缩列数。
-     * 色块风格每格上下两个像素，所以解码高度要翻倍 */
-    int cols = req_cols;
-    const int aspect_rows = (int)lround((double)cols * vp->height / vp->width * 0.5);
-    int rows = aspect_rows < 1 ? 1 : aspect_rows;
-    const int trows = terminal_rows();
-    if (trows > 1 && rows > trows - 1) { /* 留一行给提示 */
-        rows = trows - 1;
-        cols = (int)lround((double)rows * vp->width / vp->height * 2.0);
-        cols = cols < 8 ? 8 : cols;
+    /*
+     * 网格要同时塞进终端的宽和高：先按宽度铺满，再把高度压进 trows-1 行（留一行提示），
+     * 高度压过之后反推的列数还有可能超宽，所以来回夹几次直到两边都满足。
+     * 终端格子大致 1:2，所以 rows = cols / (w/h) / 2；色块风格每格两个采样点，解码高度翻倍。
+     */
+    int tcols = terminal_columns();
+    int trows = terminal_rows();
+    if (tcols <= 0) {
+        tcols = 80;
+    }
+    if (trows <= 0) {
+        trows = 24;
+    }
+    const int max_rows = trows > 2 ? trows - 1 : 1;
+    const double ar = (double)vp->width / (double)vp->height; /* 宽/高 */
+
+    int cols = req_cols > 0 ? req_cols : tcols;
+    if (cols > tcols) {
+        cols = tcols;
+    }
+    for (int pass = 0; pass < 3; ++pass) {
+        int rows_try = (int)lround((double)cols / ar * 0.5);
+        if (rows_try < 1) {
+            rows_try = 1;
+        }
+        if (rows_try <= max_rows) {
+            break;
+        }
+        cols = (int)lround((double)max_rows * ar * 2.0);
+        if (cols > tcols) {
+            cols = tcols;
+        }
+    }
+    if (cols < 8) {
+        cols = 8;
+    }
+    int rows = (int)lround((double)cols / ar * 0.5);
+    if (rows < 1) {
+        rows = 1;
+    }
+    if (rows > max_rows) {
+        rows = max_rows;
     }
     const int pix_rows = style == STYLE_BLOCK ? rows * 2 : rows;
+    if (getenv("MIKU_DEBUG_GRID")) { /* 排障用：把实际网格报到 stderr */
+        fprintf(stderr, "grid=%dx%d term=%dx%d\n", cols, rows, tcols, trows);
+    }
 
     const size_t cell_bytes = (size_t)cols * pix_rows * 3;
     cells = malloc(cell_bytes);
@@ -2325,12 +2449,32 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
     atexit(play_restore_term);
     fputs("\x1b[?25l\x1b[2J", stdout); /* 藏光标、清屏 */
 
-    const int audio = with_audio && has_audio_stream(input) && start_audio(input);
+    char sock[256];
+    snprintf(sock, sizeof sock, "%s/miku-audio-%ld.sock", temp_dir(), (long)getpid());
+    remove(sock);
+    const int audio = with_audio && has_audio_stream(input) && start_audio(input, sock);
     if (audio) {
+        snprintf(g_audio_sock, sizeof g_audio_sock, "%s", sock);
         atexit(stop_audio); /* 异常退出也别让声音一直响 */
     }
 
-    const double start = now_seconds();
+    /*
+     * 以「音频真正播起来」的那一刻作为视频的时钟原点：mpv 起播有几百毫秒延迟，
+     * 若仍从 fork 的时刻算，开头就会声画差一拍。拿不到位置就退回 fork 时刻。
+     */
+    double origin = now_seconds();
+    if (audio) {
+        /* mpv 在真正出声前也会把 time-pos 报成 0，所以要等它确实走动起来再对表 */
+        for (int i = 0; i < 80; ++i) { /* 最多等 4 秒 */
+            const double ap = audio_time_pos();
+            if (ap >= 0.12) {
+                origin = now_seconds() - ap;
+                break;
+            }
+            struct timespec ts = {0, 50000000};
+            nanosleep(&ts, NULL);
+        }
+    }
     int64_t frame = 0;
     int quit = 0;
 
@@ -2419,12 +2563,34 @@ static int play_terminal(const char *input, int req_cols, const VideoInfo *vp, i
         if (g_play_stop) {
             break;
         }
-        sleep_until(start + (double)frame / play_fps);
+
+        /* 对音频时钟：开头每 5 帧校一次快速收敛，之后每 15 帧一次 */
+        if (audio && (frame % (frame < 50 ? 5 : 15)) == 0) {
+            const double ap = audio_time_pos();
+            if (ap >= 0.0) {
+                const double drift = (double)frame / play_fps - ap;
+                if (getenv("MIKU_DEBUG_SYNC")) {
+                    fprintf(stderr, "sync t=%.2f audio=%.2f drift=%+.3f\n",
+                            (double)frame / play_fps, ap, drift);
+                }
+                /* 按漂移量收敛：差得大就一次拉回，差得小就半量追，避免来回抖 */
+                if (drift > 0.5 || drift < -0.5) {
+                    origin += drift; /* 大偏差直接对齐 */
+                } else if (drift > 0.05 || drift < -0.05) {
+                    origin += drift * 0.5;
+                }
+            }
+        }
+        sleep_until(origin + (double)frame / play_fps);
     }
 
     fputs("\x1b[0m\r\n", stdout);
     if (g_audio_pid > 0) {
         stop_audio(); /* 播完或中途退出都停掉声音 */
+    }
+    audio_ipc_close();
+    if (sock[0]) {
+        remove(sock);
     }
     ret = 1;
 
@@ -2654,17 +2820,14 @@ static void ui_clear_screen(void)
     fflush(stdout);
 }
 
-/* 读一个键；timeout_ms < 0 表示一直等 */
-static int ui_key(int timeout_ms)
+/* 读一个原始字节（0-255），超时返回 UI_NONE。不经过任何映射 */
+static int ui_read_raw(int timeout_ms)
 {
-    if (!g_ui_raw) {
-        return UI_NONE;
-    }
     fd_set fds;
     FD_ZERO(&fds);
     FD_SET(STDIN_FILENO, &fds);
     struct timeval tv;
-    struct timeval *tvp = NULL; /* NULL = 一直等；负毫秒塞进 timeval 会让 select 报 EINVAL */
+    struct timeval *tvp = NULL;
     if (timeout_ms >= 0) {
         tv.tv_sec = timeout_ms / 1000;
         tv.tv_usec = (timeout_ms % 1000) * 1000;
@@ -2677,31 +2840,64 @@ static int ui_key(int timeout_ms)
     if (read(STDIN_FILENO, &c, 1) != 1) {
         return UI_NONE;
     }
+    return (int)c;
+}
+
+/* 读一个键；timeout_ms < 0 表示一直等 */
+static int ui_key(int timeout_ms)
+{
+    if (!g_ui_raw) {
+        return UI_NONE;
+    }
+    const int c = ui_read_raw(timeout_ms);
+    if (c == UI_NONE) {
+        return UI_NONE;
+    }
     if (c == 0x1b) {
-        int seq[24];
-        int n = 0;
-        if (ui_key(20) != '[') {
+        if (ui_read_raw(20) != '[') {
             return 27; /* 单独一个 Esc */
         }
+        const int first = ui_read_raw(20);
+        if (first == UI_NONE) {
+            return UI_NONE;
+        }
+        if (first == 'M') { /* X10 鼠标：ESC [ M Cb Cx Cy（三个原始字节，各加 32） */
+            const int cb = ui_read_raw(20);
+            const int cx = ui_read_raw(20);
+            const int cy = ui_read_raw(20);
+            if (cb == UI_NONE || cx == UI_NONE || cy == UI_NONE) {
+                return UI_NONE;
+            }
+            g_ui_mx = cx - 32;
+            g_ui_my = cy - 32;
+            const int btn = cb - 32;
+            if ((btn & 64) != 0) {
+                return (btn & 1) ? UI_WHEEL_DOWN : UI_WHEEL_UP;
+            }
+            return UI_CLICK;
+        }
+        if (first >= 0x40 && first <= 0x7e) { /* 单字节终止：方向键等 */
+            if (first == 'A') return UI_UP;
+            if (first == 'B') return UI_DOWN;
+            if (first == 'C') return UI_RIGHT;
+            if (first == 'D') return UI_LEFT;
+            return UI_NONE;
+        }
+        int seq[24];
+        int n = 0;
+        seq[n++] = first;
         int last = UI_NONE;
         for (;;) {
-            last = ui_key(20);
+            last = ui_read_raw(20);
             if (last == UI_NONE) {
                 return UI_NONE;
             }
-            if (last >= 0x40 && last <= 0x7e && last < UI_TEXT_BYTE) {
+            if (last >= 0x40 && last <= 0x7e) {
                 break;
             }
             if (n < 23) {
                 seq[n++] = last;
             }
-        }
-        if (n == 0) {
-            if (last == 'A') return UI_UP;
-            if (last == 'B') return UI_DOWN;
-            if (last == 'C') return UI_RIGHT;
-            if (last == 'D') return UI_LEFT;
-            return UI_NONE;
         }
         if (seq[0] == '<' && (last == 'M' || last == 'm')) { /* SGR 鼠标 */
             char buf[40];
@@ -2723,12 +2919,12 @@ static int ui_key(int timeout_ms)
         return UI_NONE; /* 其它序列整段丢掉 */
     }
     if (c >= 0x80) {
-        return UI_TEXT_BYTE + (int)c;
+        return UI_TEXT_BYTE + c;
     }
     if (c == 8) {
         return 127;
     }
-    return (int)c;
+    return c;
 }
 
 /* 把鼠标行号换算成焦点下标；返回 -1 表示没点在任何一项上 */
@@ -2736,6 +2932,12 @@ static int ui_hit_index(int row)
 {
     for (int i = 0; i < g_hit_count; ++i) {
         if (g_hit_rows[i] == row) {
+            return i;
+        }
+    }
+    /* 触屏点得没那么准：上下各放宽一行 */
+    for (int i = 0; i < g_hit_count; ++i) {
+        if (g_hit_rows[i] == row - 1 || g_hit_rows[i] == row + 1) {
             return i;
         }
     }
@@ -2899,6 +3101,11 @@ static int ui_home(void)
             }
             continue;
         }
+        if (k >= '1' && k <= '3') { /* 数字键直选，手机键盘也方便 */
+            focus = k - '1';
+            chosen = focus;
+            continue;
+        }
         if (k == '\r' || k == '\n') {
             chosen = focus;
         }
@@ -2913,6 +3120,7 @@ static int ui_home(void)
 typedef struct {
     char name[256];
     int is_dir;
+    long long size; /* 文件字节数；目录是 0 */
 } DirEntry;
 
 static int ui_is_video(const char *name)
@@ -2955,6 +3163,7 @@ static int ui_load_dir(const char *dir, DirEntry **out, int *count)
     DirEntry *list = NULL;
     int n = 0, cap = 0;
     struct dirent *de;
+    long long dir_size = 0;
     while ((de = readdir(d)) != NULL) {
         if (strcmp(de->d_name, ".") == 0) {
             continue;
@@ -2973,6 +3182,7 @@ static int ui_load_dir(const char *dir, DirEntry **out, int *count)
             if (!is_dir && !ui_is_video(de->d_name)) {
                 continue; /* 只列视频，别的文件不挤进来 */
             }
+            dir_size = is_dir ? 0 : (long long)st.st_size;
         }
         if (n == cap) {
             const int ncap = cap ? cap * 2 : 32;
@@ -2987,6 +3197,7 @@ static int ui_load_dir(const char *dir, DirEntry **out, int *count)
         }
         snprintf(list[n].name, sizeof list[n].name, "%s", de->d_name);
         list[n].is_dir = is_dir;
+        list[n].size = is_dir ? 0 : dir_size;
         ++n;
     }
     closedir(d);
@@ -3089,7 +3300,17 @@ static int ui_pick_with_fzf(char *out, size_t cap, const char *start)
                 ok = 0;
             } else {
                 for (int i = 0; i < count; ++i) {
-                    fprintf(f, "%s%s\n", list[i].name, list[i].is_dir ? "/" : "");
+                    if (list[i].is_dir) {
+                        fprintf(f, "%s/\tdir\n", list[i].name);
+                    } else {
+                        const double mb = (double)list[i].size / (1024.0 * 1024.0);
+                        if (mb >= 1.0) {
+                            fprintf(f, "%s\t%.1f MB\n", list[i].name, mb);
+                        } else {
+                            fprintf(f, "%s\t%lld KB\n", list[i].name,
+                                    list[i].size / 1024);
+                        }
+                    }
                 }
                 fclose(f);
             }
@@ -3106,9 +3327,13 @@ static int ui_pick_with_fzf(char *out, size_t cap, const char *start)
         char *q_res = shell_quote(res);
         char *cmd = NULL;
         if (q_dir && q_in && q_res) {
-            cmd = xasprintf("fzf --height=100%% --reverse --cycle --print0 --prompt='%s > ' "
-                            "--header='Enter 进入/选定  Esc 取消（直接输入可搜索）' < %s > %s",
-                            q_dir, q_in, q_res);
+            cmd = xasprintf(
+                "fzf --height=100%% --reverse --cycle --print0 --border=rounded "
+                "--info=inline --pointer='▶' --color='fg:#d7dde7,bg:#0b0e14,hl:#7eff60,"
+                "fg+:#7eff60,hl+:#7eff60,border:#2ad4d4,header:#6b7686,prompt:#2ad4d4' "
+                "--delimiter='\t' --with-nth=1,2 "
+                "--prompt='%s > ' --header='输入可搜索 · Enter 进入/选定 · Esc 取消' < %s > %s",
+                q_dir, q_in, q_res);
         }
         free(q_dir);
         free(q_in);
@@ -3131,6 +3356,10 @@ static int ui_pick_with_fzf(char *out, size_t cap, const char *start)
 
         if (rc != 0 || !got) {
             return -1; /* Esc 或 Ctrl-C */
+        }
+        char *tab = strchr(chosen, '\t'); /* 去掉附加的大小信息 */
+        if (tab) {
+            *tab = '\0';
         }
         const size_t n = strlen(chosen);
         if (n > 0 && chosen[n - 1] == '/') { /* 目录：去掉斜杠继续往里 */
@@ -3296,11 +3525,28 @@ static int ui_pick_file(char *out, size_t cap, const char *start)
             } else {
                 sb_addf(&sb, UI_DIM);
             }
-            ui_add_text(&sb, list[idx].name, cols - 5);
+            ui_add_text(&sb, list[idx].name, cols - 14);
             if (list[idx].is_dir) {
                 sb_addf(&sb, "/");
             }
             sb_addf(&sb, UI_RESET);
+            if (!list[idx].is_dir) {
+                char meta[32];
+                const double mb = (double)list[idx].size / (1024.0 * 1024.0);
+                if (mb >= 1.0) {
+                    snprintf(meta, sizeof meta, "%.1f MB", mb);
+                } else {
+                    snprintf(meta, sizeof meta, "%lld KB", list[idx].size / 1024);
+                }
+                const int used = ui_text_width(list[idx].name) + 3;
+                const int pad = cols - used - (int)strlen(meta) - 1;
+                if (pad > 0) {
+                    ui_pad(&sb, pad);
+                    sb_addf(&sb, UI_DIM);
+                    sb_addf(&sb, "%s", meta);
+                    sb_addf(&sb, UI_RESET);
+                }
+            }
         }
         if (count == 0) {
             ui_row(&sb, list_top);
