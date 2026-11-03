@@ -13,7 +13,7 @@
  * 下标从 1 开始，分别是格式串与第一个变参的位置。其它编译器展开为空。
  */
 #if defined(__GNUC__) || defined(__clang__)
-#define MIKU_PRINTF(fmt_index, arg_index) \
+#define MIKU_PRINTF(fmt_index, arg_index)                                      \
 	__attribute__((format(printf, fmt_index, arg_index)))
 #else
 #define MIKU_PRINTF(fmt_index, arg_index)
