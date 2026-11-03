@@ -25,6 +25,35 @@ struct render_grid {
 };
 
 /*
+ * 跨帧稳定状态：记录上一帧每格实际采用的字形索引。
+ * glyph 由调用方分配并持有，cells 为总格数；primed 为 false 时第一帧不做
+ * 任何抑制。只记字形不记颜色 —— 实测颜色沿用对体积没有帮助。
+ */
+struct render_memory {
+	uint8_t *glyph; /* 每格一个字形索引。 */
+	size_t cells;	/* 总格数，等于 cols*rows。 */
+	bool primed;	/* 是否已经渲染过至少一帧。 */
+};
+
+/*
+ * miku_render_memory_init - 为 cells 个格子分配跨帧状态并清零。成功返回 0
+ * 并把数组交给调用方；失败返回 -ENOMEM，字段保持未分配。
+ *
+ * @memory: 调用方持有的稳定状态，非 const 指针允许更新。
+ * @cells: 总格数，等于 cols*rows。
+ *
+ */
+int miku_render_memory_init(struct render_memory *memory, size_t cells);
+/*
+ * miku_render_memory_free - 释放跨帧状态并把字段复位，可对已释放对象重复
+ * 调用。不转移所有权。
+ *
+ * @memory: 调用方持有的稳定状态，允许为 NULL。
+ *
+ */
+void miku_render_memory_free(struct render_memory *memory);
+
+/*
  * miku_cell_color - 将源 RGB24 像素提高饱和度后整体缩放，避免逐通道截断改
  * 变色相。
  * pixel 借用至少三个字节；返回颜色不依赖输入内存的生命周期。
@@ -45,14 +74,18 @@ int miku_pixel_level(const uint8_t *pixel);
  * miku_render_frame - 把每个采样点渲染为字符格。atlas 的尺寸必须与 grid 的
  * 格子尺寸一致。
  * output 指向画布内网格左上角，黑边由调用方预先清零；本函数不分配内存。
+ * memory 非 NULL 时启用跨帧稳定：字形墨量档差与色差都在容忍范围内就沿用
+ * 上一帧该格的值，只去掉逐帧抖动，不改变静止画面的渲染结果。
  * 输入、输出和图集由调用方持有，允许不同画布并发渲染。
  *
  * @atlas: 字形图集，创建成功后 masks 所有权交给调用方。
  * @grid: 借用的网格几何与 RGB24 输入输出。
+ * @memory: 可选的跨帧状态，NULL 表示每帧独立渲染。
  *
  */
 void miku_render_frame(const struct glyph_atlas *atlas,
-		       const struct render_grid *grid);
+		       const struct render_grid *grid,
+		       struct render_memory *memory);
 /*
  * miku_render_block_cells - 色块渲染要求 cells 有 rows*2 行 RGB24
  * 采样，output 覆盖完整网格。

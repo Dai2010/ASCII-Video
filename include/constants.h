@@ -25,6 +25,12 @@
 #define X264_PRESET "veryfast"
 #define X264_CRF "26"
 #define X264_PARAMS "colorprim=bt709:transfer=bt709:colormatrix=bt709:aq-mode=3"
+/* 跨帧稳定：候选字形与上一帧的字形只差这么几档墨量时沿用上一帧的字形。
+ * 95 个字形均匀覆盖 0..1 的墨量，2 档约等于 2% 的浓淡差，肉眼不可辨，却能
+ * 去掉亮度在档位边界抖动引起的逐帧翻字。可用 -D 覆盖，便于测量收益。 */
+#ifndef GLYPH_HOLD_TOLERANCE
+#define GLYPH_HOLD_TOLERANCE 2
+#endif /* GLYPH_HOLD_TOLERANCE */
 #define TIER_COUNT 3
 /* 实测成本：每百万像素每秒所占 CPU 秒，预算按在线核心估算。 */
 #define SW_CPU_PER_MPX 0.10

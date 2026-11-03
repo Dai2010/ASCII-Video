@@ -63,7 +63,7 @@ int main(void)
 			.cell_w = width,
 			.cell_h = height,
 		};
-		miku_render_frame(&atlas, &grid);
+		miku_render_frame(&atlas, &grid, NULL);
 		hash = hash_bytes(hash, canvas, bytes);
 		miku_render_block_cells(&grid);
 		hash = hash_bytes(hash, canvas, bytes);

@@ -31,6 +31,7 @@ struct convert_job {
 	struct glyph_atlas atlas;
 	struct layout layout;
 	struct render_grid grid;
+	struct render_memory memory;
 	FILE *decoder;
 	FILE *encoder;
 	char *decode_command;
@@ -130,8 +131,9 @@ static int convert_commands(struct convert_job *job, int sample_rows)
 
 /*
  * convert_buffers - 分配 RGB24 采样和整帧画布，画布初始全黑，网格以外始终
- * 是黑边。
+ * 是黑边。字符风格还要一份跨帧状态，色块风格不需要。
  * 只把网格左上角交给渲染器；stride 保留整张画布的宽度。
+ * 成功返回 0，失败返回 -ENOMEM，已分配的部分留给 convert_release。
  *
  * @job: 当前转换任务，独占其中管道和缓冲，阶段间共享。
  * @sample_rows: 解码采样行数，色块风格为网格行数的两倍。
@@ -156,6 +158,9 @@ static int convert_buffers(struct convert_job *job, int sample_rows)
 	grid->rows = layout->rows;
 	grid->cell_w = layout->cell_w;
 	grid->cell_h = layout->cell_h;
+	if (job->request->style == STYLE_CHAR)
+		return miku_render_memory_init(
+			&job->memory, (size_t)layout->cols * layout->rows);
 	return 0;
 }
 
@@ -235,7 +240,7 @@ static int convert_frame(struct convert_job *job)
 	if (job->request->style == STYLE_BLOCK)
 		miku_render_block_cells(&job->grid);
 	else
-		miku_render_frame(&job->atlas, &job->grid);
+		miku_render_frame(&job->atlas, &job->grid, &job->memory);
 	for (i = 0; i < repeat; i++) {
 		if (fwrite(job->canvas, 1, job->canvas_bytes, job->encoder) !=
 		    job->canvas_bytes)
@@ -341,6 +346,7 @@ static void convert_release(struct convert_job *job)
 	free(job->cells);
 	free(job->encode_command);
 	free(job->decode_command);
+	miku_render_memory_free(&job->memory);
 	free(job->atlas.masks);
 }
 
