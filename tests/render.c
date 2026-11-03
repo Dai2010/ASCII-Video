@@ -21,6 +21,63 @@ static uint64_t hash_bytes(uint64_t hash, const void *data, size_t bytes)
 	return hash;
 }
 
+/*
+ * check_hold - 跨帧稳定的语义测试：亮度只变两档时沿用上一帧字形，亮度大变
+ * 时照常换字。
+ * 样本亮度在表里搜索得到，不假设字体把某个值映射到哪一档，换字体也不会假
+ * 通过。断言失败直接中止进程。
+ *
+ */
+static void check_hold(void)
+{
+	struct glyph_atlas atlas = {0};
+	struct render_memory memory = {0};
+	struct render_grid grid;
+	uint8_t cell[3];
+	uint8_t canvas[8 * 16 * 3];
+	int first = -1;
+	int candidate;
+	int level;
+
+	assert(miku_atlas_build(&atlas, 8, 16) == 0);
+	assert(miku_render_memory_init(&memory, 1) == 0);
+	/* 找一处「再亮两档就会换字、但只换相邻几档」的亮度作为样本。 */
+	for (level = 0; level < 128; level++) {
+		first = atlas.lut[miku_gamma_lut[level]];
+		candidate = atlas.lut[miku_gamma_lut[level + 2]];
+		if (first != candidate &&
+		    abs(first - candidate) <= GLYPH_HOLD_TOLERANCE)
+			break;
+	}
+	assert(level < 128);
+
+	grid = (struct render_grid){
+		.cells = cell,
+		.output = canvas,
+		.stride = 8 * 3,
+		.cols = 1,
+		.rows = 1,
+		.cell_w = 8,
+		.cell_h = 16,
+	};
+	cell[0] = cell[1] = cell[2] = (uint8_t)level;
+	miku_render_frame(&atlas, &grid, &memory);
+	assert(memory.glyph[0] == first);
+
+	/* 亮度只动两档：候选字形确实变了，但沿用上一帧的字形。 */
+	cell[0] = cell[1] = cell[2] = (uint8_t)(level + 2);
+	miku_render_frame(&atlas, &grid, &memory);
+	assert(memory.glyph[0] == first);
+
+	/* 亮度大变：必须接受新字形，画面照常跟随。 */
+	cell[0] = cell[1] = cell[2] = 255;
+	miku_render_frame(&atlas, &grid, &memory);
+	assert(memory.glyph[0] == atlas.lut[miku_gamma_lut[255]]);
+
+	miku_render_memory_free(&memory);
+	free(atlas.masks);
+}
+
 int main(void)
 {
 	struct glyph_atlas atlas = {0};
@@ -40,6 +97,7 @@ int main(void)
 		UINT64_C(17857590708387110276)};
 
 	miku_build_gamma_lut();
+	check_hold();
 	for (i = 0; i < sizeof(cells); i++)
 		cells[i] = (uint8_t)(i * 37 + 11);
 	for (n = 0; n < 5; n++) {

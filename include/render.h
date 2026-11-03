@@ -42,6 +42,8 @@ struct render_memory {
  * @memory: 调用方持有的稳定状态，非 const 指针允许更新。
  * @cells: 总格数，等于 cols*rows。
  *
+ * 线程约束：不访问全局状态；不同 render_memory 可并发初始化，同一对象必须
+ * 串行。
  */
 int miku_render_memory_init(struct render_memory *memory, size_t cells);
 /*
@@ -50,6 +52,7 @@ int miku_render_memory_init(struct render_memory *memory, size_t cells);
  *
  * @memory: 调用方持有的稳定状态，允许为 NULL。
  *
+ * 线程约束：只操作调用方对象，不得与同一对象上的渲染并发。
  */
 void miku_render_memory_free(struct render_memory *memory);
 
@@ -82,6 +85,8 @@ int miku_pixel_level(const uint8_t *pixel);
  * @grid: 借用的网格几何与 RGB24 输入输出。
  * @memory: 可选的跨帧状态，NULL 表示每帧独立渲染。
  *
+ * 线程约束：只写调用方提供的画布与 memory；不同画布可并发渲染，同一
+ * memory 必须串行。
  */
 void miku_render_frame(const struct glyph_atlas *atlas,
 		       const struct render_grid *grid,

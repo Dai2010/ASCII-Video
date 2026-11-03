@@ -143,14 +143,14 @@ void miku_render_memory_free(struct render_memory *memory)
 }
 
 /*
- * hold_glyph - 候选字形与上一帧只差几档墨量时继续用上一帧的字形，避免亮度
- * 在档位边界抖动时字符来回切换。
+ * render_hold_glyph - 候选字形与上一帧只差几档墨量时继续用上一帧的字形，
+ * 避免亮度在档位边界抖动时字符来回切换。
  *
  * @previous: 上一帧该格实际使用的字形索引。
  * @candidate: 本帧按亮度查表得到的字形索引。
  *
  */
-static int hold_glyph(int previous, int candidate)
+static int render_hold_glyph(int previous, int candidate)
 {
 	int delta = candidate - previous;
 
@@ -195,7 +195,8 @@ void miku_render_frame(const struct glyph_atlas *atlas,
 			glyph = atlas->lut[miku_gamma_lut[level]];
 			color = miku_cell_color(pixel);
 			if (memory && memory->primed)
-				glyph = hold_glyph(memory->glyph[slot], glyph);
+				glyph = render_hold_glyph(memory->glyph[slot],
+							  glyph);
 			if (memory)
 				memory->glyph[slot] = (uint8_t)glyph;
 			mask = atlas->masks + (size_t)glyph * glyph_size;
