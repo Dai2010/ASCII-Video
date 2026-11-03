@@ -15,6 +15,7 @@
 #include "util.h"
 #include "video.h"
 
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -112,10 +113,10 @@ static void ui_pick_input(struct ui_config *state)
 			miku_ui_derive_output(state->input, state->style,
 					      state->output,
 					      sizeof state->output);
-	} else if (ret < 0)
-		miku_ui_status(
-			state,
-			"选中的文件读不了（可能已被删除或没有权限），换一个试试");
+	} else if (ret == -ENOENT) {
+		/* 取消不再提示；只有真的选定了一个读不了的路径才提示。 */
+		miku_ui_status(state, "那个路径读不了（不存在或没有权限）");
+	}
 }
 
 /*
