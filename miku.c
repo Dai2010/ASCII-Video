@@ -4352,15 +4352,12 @@ static int ui_config_screen(Config *st, int kind)
 
         if (k == UI_CLICK) {
             const int hit = ui_hit_index(g_ui_my);
-            for (int slot = 0; slot < count; ++slot) {
-                if (hit >= 0 && slot == hit) {
-                    st->focus = slot;
-                }
-            }
-            if (st->focus < count - 1) {
+            if (hit < 0) {
                 continue;
             }
-            k = '\r'; /* 点在「开始」上就当回车 */
+            /* 点哪一项就立刻当作对它的回车：文本框开编辑、开关/枚举切下一项、开始就开跑 */
+            st->focus = hit;
+            k = '\r';
         }
         if (k == UI_UP || k == 'k') {
             st->focus = (st->focus + count - 1) % count;
