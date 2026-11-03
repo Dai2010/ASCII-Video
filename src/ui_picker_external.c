@@ -80,12 +80,121 @@ static char *fzf_command(const char *dir, const char *input, const char *result)
 
 	if (quoted_dir && quoted_input && quoted_result)
 		command = miku_xasprintf(
-			"fzf --height=100%% --reverse --cycle --print0 --border=rounded --info=inline --pointer='▶' --color='fg:#d7dde7,bg:#0b0e14,hl:#7eff60,fg+:#7eff60,hl+:#7eff60,border:#2ad4d4,header:#6b7686,prompt:#2ad4d4' --delimiter='\t' --with-nth=1,2 --prompt='%s > ' --header='输入可搜索 · Enter 进入/选定 · Esc 取消' < %s > %s",
+			"fzf --height=100%% --reverse --cycle --print0 --print-query --exit-0 --border=rounded --info=inline --pointer='▶' --color='fg:#d7dde7,bg:#0b0e14,hl:#7eff60,fg+:#7eff60,hl+:#7eff60,border:#2ad4d4,header:#6b7686,prompt:#2ad4d4' --delimiter='\t' --with-nth=1,2 --prompt='%s > ' --header='输入可搜索 · / 开头的是路径 · Enter 进入/选定 · Esc 取消' < %s > %s",
 			quoted_dir, quoted_input, quoted_result);
 	free(quoted_dir);
 	free(quoted_input);
 	free(quoted_result);
 	return command;
+}
+
+/*
+ * fzf_read - 读出 fzf 的输入框内容与选中行。`--print-query` 与 `--print0`
+ * 同用时，查询在前、选中行在后，各以 NUL 结尾；没有选中行时只剩查询。
+ *
+ * @path: 借用的结果文件路径，不转移字符串所有权。
+ * @query: 调用方提供的查询缓冲。
+ * @qcap: 查询缓冲容量，单位字节。
+ * @chosen: 调用方提供的选中行缓冲。
+ * @ccap: 选中行缓冲容量，单位字节。
+ *
+ * 返回：1 读到至少一项，0 文件缺失或为空。
+ * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
+ */
+static int fzf_read(const char *path, char *query, size_t qcap, char *chosen,
+		    size_t ccap)
+{
+	char buffer[2048];
+	size_t length;
+	size_t start;
+	size_t i;
+	FILE *file;
+
+	query[0] = '\0';
+	chosen[0] = '\0';
+	file = fopen(path, "rb");
+	if (!file)
+		return 0;
+	length = fread(buffer, 1, sizeof buffer - 1, file);
+	fclose(file);
+	buffer[length] = '\0';
+	for (i = 0; i < length && buffer[i] != '\0'; i++)
+		;
+	if (i >= length)
+		return 0;
+	buffer[i] = '\0';
+	snprintf(query, qcap, "%s", buffer);
+	start = i + 1;
+	if (start < length) {
+		for (i = start; i < length && buffer[i] != '\0'; i++)
+			;
+		buffer[i] = '\0';
+		snprintf(chosen, ccap, "%s", buffer + start);
+	}
+	return query[0] || chosen[0];
+}
+
+/*
+ * fzf_path_like - 判断输入框内容是否被当作路径。只认显式的路径写法，
+ * 普通搜索词（没有前导 /、./、../、~/）一律不当路径，搜索行为不变。
+ *
+ * @text: 借用的输入框内容。
+ *
+ */
+static int fzf_path_like(const char *text)
+{
+	return text[0] == '/' || strncmp(text, "./", 2) == 0 ||
+	       strncmp(text, "../", 3) == 0 || strncmp(text, "~/", 2) == 0;
+}
+
+/*
+ * fzf_apply_path - 把输入框里的内容当路径用：是目录就切过去，是可读文件
+ * 就选定。相对路径按当前目录拼接，`~/` 展开为家目录，末尾斜杠忽略。
+ *
+ * @dir: 调用方持有的当前目录，命中目录时原地改写。
+ * @dcap: 目录缓冲容量，单位字节。
+ * @path: 借用的用户输入路径。
+ * @out: 调用方提供的结果地址，不转移其所有权。
+ * @cap: 输出数组容量，单位字节。
+ *
+ * 返回：1 已切到该目录，2 已选定文件，0 无效路径（重画列表），
+ * -2 路径存在但不可读。
+ * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
+ */
+static int fzf_apply_path(char *dir, size_t dcap, const char *path, char *out,
+			  size_t cap)
+{
+	struct stat info;
+	char joined[1024];
+	char local[1024];
+	const char *home;
+	size_t length;
+
+	if (strncmp(path, "~/", 2) == 0) {
+		home = getenv("HOME");
+		if (!home || !*home)
+			return 0;
+		snprintf(local, sizeof local, "%s/%s", home, path + 2);
+	} else {
+		snprintf(local, sizeof local, "%s", path);
+	}
+	length = strlen(local);
+	while (length > 1 && local[length - 1] == '/')
+		local[--length] = '\0';
+	if (!length)
+		return 0;
+	if (local[0] == '/')
+		snprintf(joined, sizeof joined, "%s", local);
+	else
+		miku_ui_join(joined, sizeof joined, dir, local);
+	if (stat(joined, &info) != 0)
+		return 0;
+	if (S_ISDIR(info.st_mode)) {
+		snprintf(dir, dcap, "%s", joined);
+		return 1;
+	}
+	snprintf(out, cap, "%s", joined);
+	return miku_ui_accept_path(out, cap) ? 2 : -2;
 }
 
 /*
@@ -95,10 +204,13 @@ static char *fzf_command(const char *dir, const char *input, const char *result)
  * @dir: 目录路径或调整方向，具体单位见函数说明。
  * @chosen: 调用方持有的所选结果数组。
  * @capacity: 输出数组容量，单位字节，包含结尾 NUL 空间。
+ * @query: 调用方持有的输入框内容数组。
+ * @qcap: 查询缓冲容量，单位字节。
  *
  * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
  */
-static int fzf_select(const char *dir, char *chosen, size_t capacity)
+static int fzf_select(const char *dir, char *chosen, size_t capacity,
+		      char *query, size_t qcap)
 {
 	char *input;
 	char *result;
@@ -120,8 +232,8 @@ static int fzf_select(const char *dir, char *chosen, size_t capacity)
 		miku_ui_leave();
 		status = system(command);
 		miku_ui_enter();
-		ret = status == 0 && miku_ui_read_result(result, chosen,
-							 capacity)
+		ret = status == 0 &&
+			      fzf_read(result, query, qcap, chosen, capacity)
 			      ? 1
 			      : -1;
 	}
@@ -152,15 +264,35 @@ int miku_ui_pick_with_fzf(char *out, size_t cap, const char *start)
 {
 	char dir[1024];
 	char chosen[1024];
+	char query[1024];
 	char *metadata;
 	size_t length;
+	int apply;
 	int ret;
 
 	miku_ui_initial_dir(dir, sizeof(dir), start);
 	for (;;) {
-		ret = fzf_select(dir, chosen, sizeof(chosen));
+		ret = fzf_select(dir, chosen, sizeof(chosen), query,
+				 sizeof(query));
 		if (ret != 1)
 			return ret;
+		if (!chosen[0]) {
+			/*
+			 * 没有选中行时只认显式路径写法，普通搜索词不当路径，
+			 * 搜索行为保持原样；无效路径就重画列表再来一次。
+			 */
+			if (!fzf_path_like(query))
+				continue;
+			apply = fzf_apply_path(dir, sizeof(dir), query, out,
+					       cap);
+			if (apply == 1)
+				continue;
+			if (apply == 2)
+				return 1;
+			if (apply == -2)
+				return -2;
+			continue;
+		}
 		metadata = strchr(chosen, '\t');
 		if (metadata)
 			*metadata = '\0';

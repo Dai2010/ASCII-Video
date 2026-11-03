@@ -53,10 +53,9 @@ static int ui_start(struct ui_config *st, int kind)
 	if (kind == 0) {
 		int tc;
 
-		if (!st->output[0]) {
-			miku_ui_derive_output(st->input, st->output,
+		if (!st->output[0] || st->output_auto)
+			miku_ui_derive_output(st->input, st->style, st->output,
 					      sizeof st->output);
-		}
 		if (strcmp(st->input, st->output) == 0) {
 			miku_ui_status(st, "输出不能和输入同名");
 			return 0;
@@ -106,9 +105,14 @@ static void ui_pick_input(struct ui_config *state)
 
 	ret = miku_ui_pick_file(picked, sizeof(picked),
 				state->input[0] ? state->input : ".");
-	if (ret == 0)
+	if (ret == 0) {
 		snprintf(state->input, sizeof(state->input), "%s", picked);
-	else if (ret < 0)
+		/* 换了输入就换自动输出名；手动改过的名字保持不动。 */
+		if (state->output_auto)
+			miku_ui_derive_output(state->input, state->style,
+					      state->output,
+					      sizeof state->output);
+	} else if (ret < 0)
 		miku_ui_status(
 			state,
 			"选中的文件读不了（可能已被删除或没有权限），换一个试试");
@@ -217,6 +221,7 @@ int miku_tui_main(void)
 	memset(st, 0, sizeof st);
 	for (i = 0; i < 2; ++i) {
 		st[i].style = STYLE_CHAR;
+		st[i].output_auto = 1; /* 输出名先跟着输入与风格自动派生 */
 		st[i].quality =
 			1; /* 默认原画分辨率；要降级再选 auto/high/mid/low */
 		if (access("miku.mp4", R_OK) == 0)

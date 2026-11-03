@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* list 由扫描分配并由选择器释放；屏幕尺寸随每次重绘更新。 */
 struct picker_state {
@@ -153,7 +154,8 @@ static void picker_draw(struct picker_state *state)
 	miku_ui_row(&buffer, 1);
 	miku_sb_addf(&buffer, UI_BOLD UI_ACCENT
 		     "选择视频" UI_RESET UI_DIM
-		     "  Enter 选定  ← 返回上级  q 取消" UI_RESET);
+		     "  Enter 选定  ← 返回上级  / 输入路径  q 取消"
+		     UI_RESET);
 	miku_ui_row(&buffer, 2);
 	miku_sb_addf(&buffer, UI_DIM);
 	miku_ui_add_text_tail(&buffer, state->directory, state->columns - 1);
@@ -205,6 +207,114 @@ static int picker_navigation(struct picker_state *state, int key)
 }
 
 /*
+ * picker_delete_char - 退格按 UTF-8 字符回退，避免把多字节字符拆成半个。
+ *
+ * @buffer: 调用方持有的输入缓冲，NUL 结尾。
+ * @length: 调用方持有的当前字节数。
+ *
+ */
+static void picker_delete_char(char *buffer, size_t *length)
+{
+	if (!*length)
+		return;
+	(*length)--;
+	while (*length && ((unsigned char)buffer[*length] & 0xc0) == 0x80)
+		(*length)--;
+	buffer[*length] = '\0';
+}
+
+/*
+ * picker_ask_path - 手输一行路径：是目录就切过去重新扫描，是可读文件就选定
+ * 回传。相对路径按当前目录拼接，`~/` 展开为家目录。
+ *
+ * @state: 调用方持有的当前界面状态，命中目录时原地改写。
+ * @out: 调用方提供的结果地址，不转移其所有权。
+ * @capacity: 输出数组容量，单位字节，包含结尾 NUL 空间。
+ *
+ * 返回：1 已选定可读文件，0 取消或已切换目录。
+ * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
+ */
+static int picker_ask_path(struct picker_state *state, char *out,
+			   size_t capacity)
+{
+	char buffer[1024];
+	char full[1024];
+	struct stat info;
+	struct strbuf sb;
+	const char *home;
+	size_t length = 0;
+	int columns;
+	int key;
+
+	buffer[0] = '\0';
+	columns = state->columns > 0 ? state->columns : 80;
+	for (;;) {
+		sb = (struct strbuf){0};
+		miku_ui_clear_screen();
+		miku_sb_addf(&sb, "\x1b[H");
+		miku_ui_row(&sb, 1);
+		miku_sb_addf(&sb, UI_BOLD UI_ACCENT "输入目录或文件路径" UI_RESET
+			     UI_DIM "  Enter 进入/选定   Esc 取消" UI_RESET);
+		miku_ui_row(&sb, 3);
+		miku_sb_addf(&sb, "> ");
+		miku_ui_add_text_tail(&sb, buffer, columns - 4);
+		miku_sb_addf(&sb, "\x1b[7m \x1b[0m");
+		miku_ui_flush(&sb);
+		free(sb.buf);
+
+		key = miku_ui_key(-1);
+		if (key == UI_NONE || miku_g_ui_stop)
+			return 0;
+		if (key == 27)
+			return 0;
+		if (key == '\r' || key == '\n')
+			break;
+		if (key == 127) {
+			picker_delete_char(buffer, &length);
+			continue;
+		}
+		if (key >= UI_UP && key <= UI_IGNORE)
+			continue;
+		if (key >= UI_TEXT_BYTE) {
+			if (length + 1 < sizeof buffer) {
+				buffer[length++] = (char)(key - UI_TEXT_BYTE);
+				buffer[length] = '\0';
+			}
+			continue;
+		}
+		if (key >= 32 && key < 127 && length + 1 < sizeof buffer) {
+			buffer[length++] = (char)key;
+			buffer[length] = '\0';
+		}
+	}
+	if (!buffer[0])
+		return 0;
+	if (strncmp(buffer, "~/", 2) == 0) {
+		home = getenv("HOME");
+		if (!home || !*home)
+			return 0;
+		snprintf(full, sizeof full, "%s/%s", home, buffer + 2);
+	} else if (buffer[0] == '/') {
+		snprintf(full, sizeof full, "%s", buffer);
+	} else {
+		miku_ui_join(full, sizeof full, state->directory, buffer);
+	}
+	length = strlen(full);
+	while (length > 1 && full[length - 1] == '/')
+		full[--length] = '\0';
+	if (stat(full, &info) != 0)
+		return 0;
+	if (S_ISDIR(info.st_mode)) {
+		snprintf(state->directory, sizeof state->directory, "%s",
+			 full);
+		picker_reload(state);
+		return 0;
+	}
+	snprintf(out, capacity, "%s", full);
+	return miku_ui_accept_path(out, capacity) ? 1 : 0;
+}
+
+/*
  * picker_builtin - 内置选择器返回 1 选定、0 取消、-1 文件已失效，始终释放
  * 列表。
  *
@@ -236,6 +346,13 @@ static int picker_builtin(char *out, size_t capacity, const char *start)
 				continue;
 			state.selected = index;
 			key = '\r';
+		}
+		if (key == '/') {
+			if (picker_ask_path(&state, out, capacity) == 1) {
+				ret = 1;
+				break;
+			}
+			continue;
 		}
 		if (picker_navigation(&state, key) || !state.count)
 			continue;

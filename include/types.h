@@ -115,6 +115,7 @@ struct directory_entry {
 struct ui_config {
 	char input[UI_PATH_MAX];  /* 用户输入路径，UTF-8，NUL 结尾。 */
 	char output[UI_PATH_MAX]; /* 输出路径，空串表示自动派生。 */
+	int output_auto;	  /* 非零表示输出名仍随输入与风格自动派生。 */
 	int style;		  /* STYLE_CHAR 或 STYLE_BLOCK。 */
 	int ratio;		  /* 比例索引，零表示源比例。 */
 	int fps;		  /* 指定帧率，零表示跟随源。 */
