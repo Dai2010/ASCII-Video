@@ -4,6 +4,7 @@
 #ifndef MIKU_STRBUF_H
 #define MIKU_STRBUF_H
 
+#include "attrs.h"
 #include "types.h"
 
 /*
@@ -27,6 +28,6 @@ int miku_sb_reserve(struct strbuf *buffer, size_t extra);
  * @format: printf 格式串，变参类型必须与占位符一致。
  *
  */
-int miku_sb_addf(struct strbuf *buffer, const char *format, ...);
+int miku_sb_addf(struct strbuf *buffer, const char *format, ...) MIKU_PRINTF(2, 3);
 
 #endif /* MIKU_STRBUF_H */

@@ -4,6 +4,7 @@
 #ifndef MIKU_UTIL_H
 #define MIKU_UTIL_H
 
+#include "attrs.h"
 #include "types.h"
 
 /*
@@ -34,7 +35,7 @@ double miku_dmax(double a, double b);
  *
  * 返回：拥有的字符串由调用方 free；借用指针的例外见上述说明，失败为 NULL。
  */
-char *miku_xasprintf(const char *fmt, ...);
+char *miku_xasprintf(const char *fmt, ...) MIKU_PRINTF(1, 2);
 /*
  * miku_shell_quote - 为一个完整 shell 参数添加单引号，并转义参数内部的单引
  * 号。返回拥有的堆字符串，不能再放进另一层单引号中使用。

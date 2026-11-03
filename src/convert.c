@@ -51,6 +51,10 @@ struct convert_job {
  * @fmt: printf 格式串，变参类型必须与占位符一致。
  *
  */
+/* 属性只能挂在声明上：GCC 不接受定义处的 format 属性，clang 会按
+ * -Wgcc-compat 报错，所以这里先单独声明一次。 */
+static void say(const struct convert_hooks *hooks, const char *fmt, ...) MIKU_PRINTF(2, 3);
+
 static void say(const struct convert_hooks *hooks, const char *fmt, ...)
 {
 	va_list args;

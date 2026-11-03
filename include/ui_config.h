@@ -4,6 +4,7 @@
 #ifndef MIKU_UI_CONFIG_H
 #define MIKU_UI_CONFIG_H
 
+#include "attrs.h"
 #include "types.h"
 
 /*
@@ -16,7 +17,7 @@
  * 返回：无；只执行上述更新，不转移借用对象所有权。
  * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
  */
-void miku_ui_status(struct ui_config *st, const char *fmt, ...);
+void miku_ui_status(struct ui_config *st, const char *fmt, ...) MIKU_PRINTF(2, 3);
 /*
  * miku_ui_derive_output - 从输入路径派生带 ASCII 后缀的输出名。只移除文件
  * 名部分的扩展名，避免把目录中的点误当成扩展名。
