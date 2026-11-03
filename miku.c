@@ -97,9 +97,16 @@
 #define COLOR_MAX_GAIN 8.0    /* 增益上限，避免放大接近纯黑像素的噪点 */
 
 /* x264 编码参数：2K 60fps 的编码很吃 CPU，默认用 veryfast 保证速度；
- * 想要更小的文件可改成 fast / medium / slow（越慢越小，耗时也越长） */
+ * 想要更小的文件可改成 fast / medium / slow（越慢越小，耗时也越长）
+ *
+ * CRF 26 而不是常见的 19：满屏字形是"每格一个字符、每帧都在变"的极端画面，
+ * 实测 720p30 在 CRF19 下要 25 Mbps、2K30 要 91 Mbps（源的十倍以上）。
+ * 把字形放大对比过，CRF26 与 CRF19 肉眼一致，体积直接减半；再往上（30+）
+ * 边缘会出噪点，所以停在这里。要压得更狠用 MIKU_CRF=28。 */
 #define X264_PRESET "veryfast"
-#define X264_CRF "19"         /* 越小画质越高、文件越大（常用范围 16-23） */
+#define X264_CRF "26"
+/* aq-mode=3：暗底亮字时把码率更多地分给字形所在处，实测再省约一成 */
+#define X264_PARAMS "colorprim=bt709:transfer=bt709:colormatrix=bt709:aq-mode=3"
 
 /* 输出档位：全部 16:9，宽高都是 16 的倍数（yuv420p 与硬件编码器都要求偶数，
  * 硬件编码器普遍还要求对齐到 16）。自动降级时按 high -> mid -> low 往下选 */
@@ -161,7 +168,7 @@ static const EncoderCand ENCODERS[] = {
     {"h264_vaapi", NULL, ",format=nv12,hwupload", NULL, 1, 1}, /* AMD/Intel（Linux） */
     {"h264_mediacodec", NULL, NULL, NULL, 1, 0},   /* Android */
     {"libx264", "-preset " X264_PRESET " -crf " X264_CRF
-                " -x264-params colorprim=bt709:transfer=bt709:colormatrix=bt709",
+                " -x264-params " X264_PARAMS,
      NULL, NULL, 0, 0},
     {"mpeg4", "-q:v 2", NULL, NULL, 0, 0},
 };
@@ -895,7 +902,7 @@ static const char *vaapi_device_arg(void)
     return buf[0] ? buf : NULL;
 }
 
-/* x264 参数：默认 veryfast/crf19；MIKU_PRESET / MIKU_CRF 可覆盖。
+/* x264 参数：默认 veryfast/crf26；MIKU_PRESET / MIKU_CRF 可覆盖。
  * 想快就 MIKU_PRESET=ultrafast：编码约快 2.2 倍、同画质体积大 1.6 倍
  * （ultrafast 关了 CABAC）。返回的字符串用完要 free */
 static char *x264_args(void)
@@ -908,8 +915,7 @@ static char *x264_args(void)
     if (!crf || !*crf) {
         crf = X264_CRF;
     }
-    return xasprintf("-preset %s -crf %s -x264-params colorprim=bt709:transfer=bt709:colormatrix=bt709",
-                     preset, crf);
+    return xasprintf("-preset %s -crf %s -x264-params " X264_PARAMS, preset, crf);
 }
 
 /* 该编码器实际要用的参数；x264 走环境变量，其余用表里的固定值或码率 */
