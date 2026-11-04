@@ -22,8 +22,6 @@ static int g_ui_alt = 0;
 
 volatile sig_atomic_t miku_g_ui_stop = 0;
 
-static int g_ui_mx;
-
 int miku_g_ui_my;
 
 static int g_hit_rows[UI_HIT_MAX];
@@ -164,7 +162,6 @@ static int ui_x10_mouse(void)
 
 	if (button == UI_NONE || x == UI_NONE || y == UI_NONE)
 		return UI_NONE;
-	g_ui_mx = x - 32;
 	miku_g_ui_my = y - 32;
 	button -= 32;
 	if (button & 64)
@@ -191,7 +188,6 @@ static int ui_sgr_mouse(const char *sequence, int final)
 
 	if (sscanf(sequence, "<%d;%d;%d", &button, &x, &y) != 3)
 		return UI_NONE;
-	g_ui_mx = x;
 	miku_g_ui_my = y;
 	if (button & 64)
 		return button & 1 ? UI_WHEEL_DOWN : UI_WHEEL_UP;
