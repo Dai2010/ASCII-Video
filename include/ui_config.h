@@ -4,6 +4,7 @@
 #ifndef MIKU_UI_CONFIG_H
 #define MIKU_UI_CONFIG_H
 
+#include "attrs.h"
 #include "types.h"
 
 /*
@@ -16,19 +17,22 @@
  * 返回：无；只执行上述更新，不转移借用对象所有权。
  * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
  */
-void miku_ui_status(struct ui_config *st, const char *fmt, ...);
+void miku_ui_status(struct ui_config *st, const char *fmt, ...)
+	MIKU_PRINTF(2, 3);
 /*
- * miku_ui_derive_output - 从输入路径派生带 ASCII 后缀的输出名。只移除文件
- * 名部分的扩展名，避免把目录中的点误当成扩展名。
+ * miku_ui_derive_output - 从输入路径派生带风格后缀的输出名。只移除文件名
+ * 部分的扩展名，避免把目录中的点误当成扩展名。字符风格加 `-ascii.mp4`，
+ * 色块风格加 `-block.mp4`，同一部片子转两种风格不会互相覆盖。
  *
  * @in: 借用的输入媒体路径，必须以 NUL 结尾。
+ * @style: STYLE_CHAR 或 STYLE_BLOCK，决定后缀。
  * @out: 调用方提供的结果地址，不转移其所有权。
  * @cap: 输出数组容量，单位字节，包含结尾 NUL 空间。
  *
  * 返回：无；只执行上述更新，不转移借用对象所有权。
  * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
  */
-void miku_ui_derive_output(const char *in, char *out, size_t cap);
+void miku_ui_derive_output(const char *in, int style, char *out, size_t cap);
 /*
  * miku_ui_edit_field - 在调用方路径数组内直接编辑。退格按 UTF-8 字符回退，
  * 容量不足时拒绝继续追加；Esc 结束编辑但保留已输入内容。

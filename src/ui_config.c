@@ -36,27 +36,31 @@ void miku_ui_status(struct ui_config *st, const char *fmt, ...)
 }
 
 /*
- * miku_ui_derive_output - 从输入路径派生带 ASCII 后缀的输出名。只移除文件
- * 名部分的扩展名，避免把目录中的点误当成扩展名。
+ * miku_ui_derive_output - 从输入路径派生带风格后缀的输出名。只移除文件名
+ * 部分的扩展名，避免把目录中的点误当成扩展名。字符风格加 `-ascii.mp4`，
+ * 色块风格加 `-block.mp4`，同一部片子转两种风格不会互相覆盖。
  *
  * @in: 借用的输入媒体路径，必须以 NUL 结尾。
+ * @style: STYLE_CHAR 或 STYLE_BLOCK，决定后缀。
  * @out: 调用方提供的结果地址，不转移其所有权。
  * @cap: 输出数组容量，单位字节，包含结尾 NUL 空间。
  *
  * 返回：无；只执行上述更新，不转移借用对象所有权。
  * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
  */
-void miku_ui_derive_output(const char *in, char *out, size_t cap)
+void miku_ui_derive_output(const char *in, int style, char *out, size_t cap)
 {
+	const char *suffix = style == STYLE_BLOCK ? "-block.mp4" : "-ascii.mp4";
 	const char *dot = strrchr(in, '.');
 	const char *slash = strrchr(in, '/');
+	size_t need = strlen(suffix) + 1;
 	size_t keep = (dot && (!slash || dot > slash)) ? (size_t)(dot - in)
 						       : strlen(in);
-	if (keep + 12 > cap)
-		keep = cap > 12 ? cap - 12 : 0;
+	if (keep + need > cap)
+		keep = cap > need ? cap - need : 0;
 	memcpy(out, in, keep);
 	out[keep] = '\0';
-	strncat(out, "-ascii.mp4", cap - keep - 1);
+	strncat(out, suffix, cap - keep - 1);
 }
 
 /*
@@ -179,15 +183,17 @@ void miku_ui_edit_field(struct ui_config *st, int which, const char *title)
 
 		k = miku_ui_key(-1);
 		if (k == UI_NONE || miku_g_ui_stop)
-			return;
-		if (k == 27)
-			return;
-		if (k == '\r' || k == '\n')
-			return;
+			break;
+		if (k == 27 || k == '\r' || k == '\n')
+			break;
 		if (k == 127) {
 			ui_delete_character(buf, &len);
 			continue;
 		}
+		/* 方向键、滚轮与点击是命令键（1001..1008），不是文本；当成
+		 * UTF-8 字节会把半个序列塞进路径，显示成乱码。 */
+		if (k >= UI_UP && k <= UI_IGNORE)
+			continue;
 		if (k >= UI_TEXT_BYTE) {
 			if (len + 1 < UI_PATH_MAX) {
 				buf[len++] = (char)(k - UI_TEXT_BYTE);
@@ -199,6 +205,17 @@ void miku_ui_edit_field(struct ui_config *st, int which, const char *title)
 			buf[len++] = (char)k;
 			buf[len] = '\0';
 		}
+	}
+	/*
+	 * 输出名一旦被手动改成别的名字，就不再随输入或风格自动改写；留空或
+	 * 仍等于派生名时视为自动。
+	 */
+	if (which == CFG_OUTPUT) {
+		char derived[UI_PATH_MAX];
+
+		miku_ui_derive_output(st->input, st->style, derived,
+				      sizeof derived);
+		st->output_auto = !buf[0] || strcmp(buf, derived) == 0;
 	}
 }
 
@@ -261,11 +278,13 @@ static void ui_cfg_value(const struct ui_config *st, int item, char *out,
 		if (st->output[0]) {
 			snprintf(out, cap, "%s", st->output);
 		} else if (st->input[0]) {
-			miku_ui_derive_output(st->input, derived,
+			miku_ui_derive_output(st->input, st->style, derived,
 					      sizeof derived);
 			snprintf(out, cap, "自动 → %s", derived);
 		} else {
-			snprintf(out, cap, "自动（输入名-ascii.mp4）");
+			snprintf(out, cap, "自动（输入名%s）",
+				 st->style == STYLE_BLOCK ? "-block.mp4"
+							  : "-ascii.mp4");
 		}
 		break;
 	case CFG_STYLE:
@@ -432,6 +451,10 @@ void miku_ui_cfg_adjust(struct ui_config *st, int item, int dir)
 	switch (item) {
 	case CFG_STYLE:
 		st->style = !st->style;
+		/* 自动派生的输出名跟着风格换后缀，两种风格才各有各的文件。 */
+		if (st->output_auto && st->input[0])
+			miku_ui_derive_output(st->input, st->style, st->output,
+					      sizeof st->output);
 		break;
 	case CFG_RATIO:
 		st->ratio = (st->ratio + dir + RATIO_COUNT) % RATIO_COUNT;

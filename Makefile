@@ -51,7 +51,7 @@ $(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(OPT) -MMD -MP -c $< -o $@
 
 $(PROGRAM): $(OBJECTS)
-	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OPT) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 $(BUILD_DIR)/playback-test: tests/playback.c $(LIB_OBJECTS) | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(OPT) $(LDFLAGS) $< $(LIB_OBJECTS) \
