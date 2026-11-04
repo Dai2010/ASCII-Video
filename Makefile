@@ -4,6 +4,7 @@
 # miku 构建脚本。常用目标：
 #   make                                编译 $(BUILD_DIR)/miku（默认 build/miku）
 #   make test                           编译并运行 tests/ 下的单元测试
+#   make line                           只检查缩进，列出文件与行号
 #   make clean                          删除本构建目录里的目标文件与可执行文件
 #   make help                           列出目标与可覆盖变量
 #   make BUILD_DIR=build/debug OPT="-O0 -g3"   另起一个调试构建目录
@@ -39,7 +40,7 @@ TESTS       := $(BUILD_DIR)/playback-test $(BUILD_DIR)/render-test \
 TIMEOUT := $(firstword $(shell command -v timeout gtimeout 2>/dev/null))
 
 .DEFAULT_GOAL := all
-.PHONY: all test format-check clean help
+.PHONY: all test line format-check clean help
 
 all: $(PROGRAM)
 
@@ -76,6 +77,10 @@ test: $(TESTS)
 	$(if $(TIMEOUT),$(TIMEOUT) 5s) $(BUILD_DIR)/buffer-test
 	$(PYTHON) tests/video.py $(BUILD_DIR)/video-test
 
+# 只报告缩进问题；LINE_FILES 留空时检查正式源码和脚本，不修改文件
+line:
+	$(PYTHON) tests/line.py $(LINE_FILES)
+
 # 格式检查需要 clang-format；Python 脚本检查本项目的额外风格规则
 format-check:
 	clang-format --dry-run --Werror src/*.c include/*.h tests/*.c
@@ -90,6 +95,7 @@ help:
 	@echo "目标:"
 	@echo "  all           编译 $(PROGRAM)（默认）"
 	@echo "  test          编译并运行单元测试"
+	@echo "  line          检查八列缩进，输出文件、行号和原因"
 	@echo "  format-check  clang-format 与风格脚本检查"
 	@echo "  clean         删除 $(BUILD_DIR)/ 中的目标文件与可执行文件"
 	@echo "变量: CC=$(CC)  OPT='$(OPT)'  WERROR='$(WERROR)'  BUILD_DIR=$(BUILD_DIR)"

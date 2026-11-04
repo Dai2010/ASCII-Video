@@ -98,7 +98,7 @@ static char *fzf_command(const char *dir, const char *input, const char *result)
  * @chosen: 调用方提供的选中行缓冲。
  * @ccap: 选中行缓冲容量，单位字节。
  *
- * 返回：1 读到至少一项，0 文件缺失或为空。
+ * 返回：1 读到至少一项，0 文件缺失、为空或字段超出容量。
  * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
  */
 static int fzf_read(const char *path, char *query, size_t qcap, char *chosen,
@@ -120,16 +120,18 @@ static int fzf_read(const char *path, char *query, size_t qcap, char *chosen,
 	buffer[length] = '\0';
 	for (i = 0; i < length && buffer[i] != '\0'; i++)
 		;
-	if (i >= length)
+	if (i >= length || i >= qcap)
 		return 0;
 	buffer[i] = '\0';
-	snprintf(query, qcap, "%s", buffer);
+	memcpy(query, buffer, i + 1);
 	start = i + 1;
 	if (start < length) {
 		for (i = start; i < length && buffer[i] != '\0'; i++)
 			;
+		if (i - start >= ccap)
+			return 0;
 		buffer[i] = '\0';
-		snprintf(chosen, ccap, "%s", buffer + start);
+		memcpy(chosen, buffer + start, i - start + 1);
 	}
 	return query[0] || chosen[0];
 }
