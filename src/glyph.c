@@ -25,9 +25,7 @@
  */
 static int font_bit(int glyph, int x, int y)
 {
-	return (miku_font_bitmap[glyph][y] >>
-		(FONT_SRC_W - 1 - x)) &
-	       1;
+	return (miku_font_bitmap[glyph][y] >> (FONT_SRC_W - 1 - x)) & 1;
 }
 
 /* 面积采样范围使用源字体坐标，右、下边界为开区间。 */

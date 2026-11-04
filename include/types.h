@@ -34,7 +34,8 @@ struct profile {
 	char name[32]; /* 供界面和日志显示的档位名称。 */
 	int width;     /* 实际输出宽度，单位像素。 */
 	int height;    /* 实际输出高度，单位像素。 */
-	int fps;       /* 实际输出帧率。档位默认值不超过源帧率；显式指定的可高于源帧率。 */
+	/* 实际输出帧率。档位默认值不超过源帧率；显式指定的可高于源帧率。 */
+	int fps;
 	const struct encoder_candidate
 		*enc; /* 已通过真实短片探测的编码器候选。 */
 };
