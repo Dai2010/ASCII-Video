@@ -220,8 +220,9 @@ static int cli_quality(struct cli_options *options)
 		return 0;
 	}
 	if (!(miku_parse_custom_size(argument, &width, &height, &fps) == 0) &&
-	    strcmp(argument, "auto") != 0 && strcmp(argument, "high") != 0 &&
-	    strcmp(argument, "mid") != 0 && strcmp(argument, "low") != 0)
+	    strcmp(argument, "auto") != 0 && strcmp(argument, "src") != 0 &&
+	    strcmp(argument, "high") != 0 && strcmp(argument, "mid") != 0 &&
+	    strcmp(argument, "low") != 0)
 		return -EINVAL;
 	options->request.quality = argument;
 	return 0;

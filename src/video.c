@@ -9,26 +9,11 @@
 #include "encoder.h"
 #include "util.h"
 
-#include <dirent.h>
-#include <fcntl.h>
 #include <errno.h>
 #include <math.h>
-#include <signal.h>
-#include <stdarg.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/select.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <termios.h>
-#include <time.h>
-#include <unistd.h>
 
 const char *miku_ratio_names[RATIO_COUNT] = {"原画", "16:9", "9:16",
 					     "1:1",  "4:3",  "21:9"};
@@ -122,23 +107,19 @@ int miku_choose_profile_ex(const char *quality, int ratio, int fps_want,
 	if (!(miku_choose_profile(quality, src_rounded, p) == 0))
 		return -ENODEV;
 
-	if (ratio > 0) {
-
-		ratio_dims(ratio, vi, p->height, &w, &h);
+	if (!quality || !*quality || strcmp(quality, "auto") == 0)
+		p->height = miku_clamp_int(vi->height & ~1,
+					   miku_tiers[TIER_COUNT - 1].height,
+					   p->height);
+	ratio_dims(ratio, vi, p->height, &w, &h);
+	if (fps_want > 0)
+		p->fps = fps_want;
+	if (w != p->width || h != p->height || fps_want > 0) {
 		enc = miku_pick_encoder(w, h, p->fps);
 		if (!enc)
 			return -ENODEV;
 		p->width = w;
 		p->height = h;
-		p->enc = enc;
-	}
-
-	/* 显式帧率原样生效；高于源帧率时由转换阶段按源帧重复补齐 */
-	if (fps_want > 0 && fps_want != p->fps) {
-		enc = miku_pick_encoder(p->width, p->height, fps_want);
-		if (!enc)
-			return -ENODEV;
-		p->fps = fps_want;
 		p->enc = enc;
 	}
 	return 0;

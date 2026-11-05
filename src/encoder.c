@@ -146,47 +146,39 @@ int miku_cpu_cores(void)
 }
 
 /*
- * encoder_listed_by_name - 检查 ffmpeg 的编码器列表是否包含完整的编码器名
- * 称。列出不等于能编码，实际可用性还需短片探测。
+ * scan_encoder_line - 在单行编码器输出中匹配所有未命中候选，词边界只认空白
+ * 或行首。
  *
- * @codec: 固定的编码器名称。
- *
- * 返回：上述计算结果或状态；其单位和取值含义见说明。
- * 线程约束：编码器探测及其静态缓存由主线程串行访问。
+ * @line: ffmpeg -encoders 输出的一行文本。
+ * @cache: 长度为 ENCODER_COUNT 的状态数组，命中置 1。
  */
-static int encoder_listed_by_name(const char *codec)
+static void scan_encoder_line(const char *line, signed char *cache)
 {
+	const char *codec;
+	const char *hit;
 	size_t n;
-	char line[256];
-	int found;
+	int i;
 
-	FILE *p = popen("ffmpeg -hide_banner -encoders 2>/dev/null", "r");
-	if (!p)
-		return 0;
-	n = strlen(codec);
-
-	found = 0;
-	while (!found && fgets(line, sizeof line, p)) {
-		const char *hit;
-
+	for (i = 0; i < ENCODER_COUNT; i++) {
+		if (cache[i] > 0)
+			continue;
+		codec = miku_encoders[i].codec;
+		n = strlen(codec);
 		for (hit = strstr(line, codec); hit;
 		     hit = strstr(hit + 1, codec)) {
-			const int left_ok = hit == line || hit[-1] == ' ' ||
-					    hit[-1] == '\t';
-			const char next = hit[n];
-			if (left_ok && (next == ' ' || next == '\t')) {
-				found = 1;
+			if ((hit == line || hit[-1] == ' ' ||
+			     hit[-1] == '\t') &&
+			    (hit[n] == ' ' || hit[n] == '\t')) {
+				cache[i] = 1;
 				break;
 			}
 		}
 	}
-	pclose(p);
-	return found;
 }
 
 /*
- * miku_encoder_listed - 按候选索引查询并缓存 ffmpeg 是否列出编码器。缓存只
- * 表示注册情况，不替代实际编码探测。
+ * miku_encoder_listed - 首次调用时执行一次 ffmpeg -encoders 扫描并缓存全部
+ * 候选的注册情况。缓存只表示注册情况，不替代实际编码探测。
  *
  * @idx: 候选编码器索引，必须处于候选表范围内。
  *
@@ -195,11 +187,24 @@ static int encoder_listed_by_name(const char *codec)
  */
 bool miku_encoder_listed(int idx)
 {
-	static signed char cache[9]; /* 0 = 还没查过 */
-	if (cache[idx] == 0) {
-		cache[idx] = encoder_listed_by_name(miku_encoders[idx].codec)
-				     ? 1
-				     : -1;
+	static signed char cache[ENCODER_COUNT];
+	static int scanned;
+	char line[256];
+	FILE *p;
+	int i;
+
+	if (idx < 0 || idx >= ENCODER_COUNT)
+		return false;
+	if (!scanned) {
+		scanned = 1;
+		for (i = 0; i < ENCODER_COUNT; i++)
+			cache[i] = -1;
+		p = popen("ffmpeg -hide_banner -encoders 2>/dev/null", "r");
+		if (p) {
+			while (fgets(line, sizeof line, p))
+				scan_encoder_line(line, cache);
+			pclose(p);
+		}
 	}
 	return cache[idx] > 0;
 }
@@ -268,8 +273,31 @@ static const char *vaapi_device_arg(void)
 }
 
 /*
- * x264_args - 读取 MIKU_PRESET/MIKU_CRF 覆盖项，未设置时使用项目默认值；拼
- * 接软件编码器参数并返回拥有的字符串。
+ * safe_token - 校验环境变量仅含 ASCII 字母、数字、点或连字符，防止拼接到
+ * shell 命令时引入空白或元字符。
+ *
+ * @s: 待检查的环境变量字符串。
+ *
+ * 返回：1 为非空安全词元，0 为空或含其它字符。
+ */
+static int safe_token(const char *s)
+{
+	const unsigned char *p = (const unsigned char *)s;
+
+	if (!p || !*p)
+		return 0;
+	for (; *p; p++) {
+		if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+		    (*p >= '0' && *p <= '9') || *p == '.' || *p == '-')
+			continue;
+		return 0;
+	}
+	return 1;
+}
+
+/*
+ * x264_args - 读取 MIKU_PRESET/MIKU_CRF 覆盖项，未设置或含非法字符时使用项
+ * 目默认值；拼接软件编码器参数并返回拥有的字符串。
  *
  * 返回：拥有的字符串由调用方 free；借用指针的例外见上述说明，失败为 NULL。
  * 线程约束：编码器探测及其静态缓存由主线程串行访问。
@@ -278,9 +306,10 @@ static char *x264_args(void)
 {
 	const char *preset = getenv("MIKU_PRESET");
 	const char *crf = getenv("MIKU_CRF");
-	if (!preset || !*preset)
+
+	if (!safe_token(preset))
 		preset = X264_PRESET;
-	if (!crf || !*crf)
+	if (!safe_token(crf))
 		crf = X264_CRF;
 	return miku_xasprintf("-preset %s -crf %s -x264-params " X264_PARAMS,
 			      preset, crf);
@@ -358,6 +387,47 @@ static int count_decodable_frames(const char *path)
 	return frames;
 }
 
+struct probe_record {
+	const struct encoder_candidate *c;
+	int w;
+	int h;
+	int fps;
+	int ok;
+};
+
+static struct probe_record g_probe_cache[32];
+static int g_probe_count;
+
+/*
+ * probe_cache_lookup - 查询编码器短片探测缓存。高规格已通过则低或同规格直
+ * 接复用；已失败且新规格不低于失败规格时直接判负，避免重复拉起子进程。
+ *
+ * @c: 借用的编码器候选，只读。
+ * @w: 宽度像素值。
+ * @h: 高度像素值。
+ * @fps: 帧率，单位为帧/秒。
+ *
+ * 返回：1 命中可用，0 命中不可用，-1 未命中。
+ */
+static int probe_cache_lookup(const struct encoder_candidate *c, int w, int h,
+			      int fps)
+{
+	const struct probe_record *r;
+	int i;
+
+	for (i = 0; i < g_probe_count; i++) {
+		r = &g_probe_cache[i];
+		if (r->c != c)
+			continue;
+		if (r->ok && w <= r->w && h <= r->h && fps <= r->fps)
+			return 1;
+		if (!r->ok &&
+		    ((w >= r->w && h >= r->h && fps >= r->fps) || r->w <= 2560))
+			return 0;
+	}
+	return -1;
+}
+
 /*
  * miku_encoder_works - 实际编码少量黑帧再解码计数。两个步骤均成功才接受候
  * 选，所有探测命令、临时文件和路径均在返回前释放。
@@ -373,14 +443,18 @@ static int count_decodable_frames(const char *path)
 bool miku_encoder_works(const struct encoder_candidate *c, int w, int h,
 			int fps)
 {
+	const char *prefix = miku_cand_input_prefix(c);
 	char *args;
 	char *out;
 	char *cmd;
+	int cached;
 	int ok;
 
-	const char *prefix = miku_cand_input_prefix(c);
 	if (c->vaapi && !prefix)
 		return 0; /* 本机没有 renderD* 设备，vaapi 无从谈起 */
+	cached = probe_cache_lookup(c, w, h, fps);
+	if (cached >= 0)
+		return cached > 0;
 	args = miku_encoder_args(c, w, h, fps);
 	if (!args)
 		return 0;
@@ -406,6 +480,9 @@ bool miku_encoder_works(const struct encoder_candidate *c, int w, int h,
 	}
 	remove(out);
 	free(out);
+	if (g_probe_count < 32)
+		g_probe_cache[g_probe_count++] =
+			(struct probe_record){c, w, h, fps, ok};
 	return ok;
 }
 
@@ -571,7 +648,7 @@ static int choose_auto_profile(int source_fps, struct profile *profile)
 	for (i = 0; i < TIER_COUNT; i++) {
 		profile_from_tier(&candidate, i, source_fps);
 		candidate.enc = miku_pick_encoder(
-			candidate.width, candidate.height, miku_tiers[i].fps);
+			candidate.width, candidate.height, candidate.fps);
 		if (!candidate.enc)
 			continue;
 		*profile = candidate;
@@ -580,10 +657,6 @@ static int choose_auto_profile(int source_fps, struct profile *profile)
 		if (profile_cpu(&candidate) <= budget)
 			return 1;
 	}
-	if (!profile->enc)
-		return 0;
-	profile->enc = miku_pick_encoder(profile->width, profile->height,
-					 profile->fps);
 	return profile->enc != NULL;
 }
 

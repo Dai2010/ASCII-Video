@@ -25,12 +25,13 @@ struct render_grid {
 };
 
 /*
- * 跨帧稳定状态：记录上一帧每格实际采用的字形索引。
- * glyph 由调用方分配并持有，cells 为总格数；primed 为 false 时第一帧不做
- * 任何抑制。只记字形不记颜色 —— 实测颜色沿用对体积没有帮助。
+ * 跨帧稳定状态：记录上一帧每格实际采用的字形索引与 RGB 颜色。
+ * glyph 与 color 由调用方分配并持有，cells 为总格数；primed 为 false 时第
+ * 一帧不做任何抑制。字形与颜色均未变时可直接跳过整格重绘。
  */
 struct render_memory {
 	uint8_t *glyph; /* 每格一个字形索引。 */
+	uint8_t *color; /* 每格三个字节，依次为上一帧的 R、G、B。 */
 	size_t cells;	/* 总格数，等于 cols*rows。 */
 	bool primed;	/* 是否已经渲染过至少一帧。 */
 };

@@ -118,10 +118,13 @@ static void paint_glyph(const struct render_grid *grid, const uint8_t *mask,
 int miku_render_memory_init(struct render_memory *memory, size_t cells)
 {
 	memory->glyph = calloc(cells, 1);
+	memory->color = calloc(cells, 3);
 	memory->cells = cells;
 	memory->primed = false;
-	if (!memory->glyph)
+	if (!memory->glyph || !memory->color) {
+		miku_render_memory_free(memory);
 		return -ENOMEM;
+	}
 	return 0;
 }
 
@@ -137,7 +140,9 @@ void miku_render_memory_free(struct render_memory *memory)
 	if (!memory)
 		return;
 	free(memory->glyph);
+	free(memory->color);
 	memory->glyph = NULL;
+	memory->color = NULL;
 	memory->cells = 0;
 	memory->primed = false;
 }
@@ -160,11 +165,53 @@ static int render_hold_glyph(int previous, int candidate)
 }
 
 /*
+ * render_stabilize_cell - 对单格执行字形与颜色跨帧稳定。若与上一帧保持相
+ * 同字形且三通道色差均在容忍范围内，沿用上一帧颜色并返回 true 表示整格无需
+ * 重绘；否则更新跨帧记录并返回 false。
+ *
+ * @memory: 可选的跨帧状态，NULL 时直接返回 false。
+ * @slot: 当前格在网格中的线性下标。
+ * @glyph: 输入输出字形索引。
+ * @color: 输入输出格子颜色。
+ *
+ */
+static bool render_stabilize_cell(struct render_memory *memory, size_t slot,
+				  int *glyph, struct rgb *color)
+{
+	uint8_t *prev;
+	int old_glyph;
+	bool color_held = false;
+
+	if (!memory)
+		return false;
+	prev = memory->color + slot * 3;
+	old_glyph = memory->primed ? memory->glyph[slot] : -1;
+	if (memory->primed)
+		*glyph = render_hold_glyph(old_glyph, *glyph);
+	memory->glyph[slot] = (uint8_t)*glyph;
+	if (*glyph == 0 && old_glyph == 0)
+		return true;
+	if (memory->primed && abs(color->r - prev[0]) <= COLOR_HOLD_TOLERANCE &&
+	    abs(color->g - prev[1]) <= COLOR_HOLD_TOLERANCE &&
+	    abs(color->b - prev[2]) <= COLOR_HOLD_TOLERANCE) {
+		color->r = prev[0];
+		color->g = prev[1];
+		color->b = prev[2];
+		color_held = true;
+	} else {
+		prev[0] = (uint8_t)color->r;
+		prev[1] = (uint8_t)color->g;
+		prev[2] = (uint8_t)color->b;
+	}
+	return *glyph == old_glyph && color_held;
+}
+
+/*
  * miku_render_frame - 把每个采样点渲染为字符格。atlas 的尺寸必须与 grid 的
  * 格子尺寸一致。
  * output 指向画布内网格左上角，黑边由调用方预先清零；本函数不分配内存。
  * memory 非 NULL 时启用跨帧稳定：候选字形与上一帧只差几档墨量就沿用上一
- * 帧该格的字形，只去掉逐帧翻字，不改变静止画面的渲染结果。
+ * 帧该格的字形，颜色也在容忍范围内时直接跳过重绘，不改变静止画面的结果。
  * 输入、输出和图集由调用方持有，允许不同画布并发渲染。
  *
  * @atlas: 字形图集，创建成功后 masks 所有权交给调用方。
@@ -182,7 +229,6 @@ void miku_render_frame(const struct glyph_atlas *atlas,
 	size_t glyph_size = (size_t)grid->cell_w * grid->cell_h;
 	size_t slot;
 	struct rgb color;
-	int level;
 	int glyph;
 	int y;
 	int x;
@@ -191,14 +237,15 @@ void miku_render_frame(const struct glyph_atlas *atlas,
 		for (x = 0; x < grid->cols; x++) {
 			slot = (size_t)y * grid->cols + x;
 			pixel = grid->cells + slot * 3;
-			level = miku_pixel_level(pixel);
-			glyph = atlas->lut[miku_gamma_lut[level]];
+			glyph = atlas->lut[miku_gamma_lut[miku_pixel_level(
+				pixel)]];
+			if (memory && memory->primed &&
+			    memory->glyph[slot] == 0 &&
+			    glyph <= GLYPH_HOLD_TOLERANCE)
+				continue;
 			color = miku_cell_color(pixel);
-			if (memory && memory->primed)
-				glyph = render_hold_glyph(memory->glyph[slot],
-							  glyph);
-			if (memory)
-				memory->glyph[slot] = (uint8_t)glyph;
+			if (render_stabilize_cell(memory, slot, &glyph, &color))
+				continue;
 			mask = atlas->masks + (size_t)glyph * glyph_size;
 			output = grid->output +
 				 y * grid->cell_h * grid->stride +

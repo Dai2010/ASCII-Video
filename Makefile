@@ -17,7 +17,7 @@
 #   PYTHON     tests/style.py 使用的解释器，默认优先 .venv 中的 Python
 
 CC        ?= cc
-OPT       ?= -O2 -g
+OPT       ?= -O3 -g
 WERROR    ?= -Werror
 BUILD_DIR ?= build
 PYTHON    ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)

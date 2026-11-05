@@ -95,7 +95,7 @@ static char *encode_command(const struct convert_job *job,
 	if (!args)
 		return NULL;
 	command = miku_xasprintf(
-		"ffmpeg -y -v error %s -f rawvideo -pix_fmt rgb24 -s %dx%d -framerate %d -i pipe:0 -i %s -map 0:v:0 -map '1:a:0?' -vf 'scale=out_color_matrix=bt709:out_range=tv,format=yuv420p%s' -r %d -c:v %s %s -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -af apad -c:a aac -b:a 192k -movflags +faststart -shortest %s",
+		"ffmpeg -y -v error %s -f rawvideo -pix_fmt rgb24 -s %dx%d -framerate %d -i pipe:0 -vn -sn -dn -i %s -map 0:v:0 -map '1:a:0?' -vf 'scale=out_color_matrix=bt709:out_range=tv,format=yuv420p%s' -r %d -c:v %s %s -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -af apad -c:a aac -b:a 128k -movflags +faststart -shortest %s",
 		prefix ? prefix : "", p->width, p->height, p->fps, quoted_input,
 		p->enc->pipe_filter ? p->enc->pipe_filter : "", p->fps,
 		p->enc->codec, args, quoted_output);
@@ -118,9 +118,9 @@ static int convert_commands(struct convert_job *job, int sample_rows)
 
 	if (input && output) {
 		job->decode_command = miku_xasprintf(
-			"ffmpeg -nostdin -v error -i %s -an -sn -vf 'fps=%ld/%ld,scale=%d:%d:flags=area' -f rawvideo -pix_fmt rgb24 pipe:1",
-			input, job->info->fps_num, job->info->fps_den,
-			job->layout.cols, sample_rows);
+			"ffmpeg -nostdin -v error -i %s -an -sn -vf 'scale=%d:%d:flags=area,fps=%ld/%ld' -f rawvideo -pix_fmt rgb24 pipe:1",
+			input, job->layout.cols, sample_rows,
+			job->info->fps_num, job->info->fps_den);
 		job->encode_command = encode_command(job, input, output);
 		if (job->decode_command && job->encode_command)
 			ret = 0;
@@ -206,6 +206,8 @@ static int convert_prepare(struct convert_job *job)
 	job->encoder = popen(job->encode_command, "w");
 	if (!job->encoder)
 		return -errno;
+	setvbuf(job->decoder, NULL, _IOFBF, 1024 * 1024);
+	setvbuf(job->encoder, NULL, _IOFBF, 1024 * 1024);
 	job->start = miku_now_seconds();
 	return 0;
 }

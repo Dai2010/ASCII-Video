@@ -21,16 +21,21 @@
 #define COLOR_GAIN 1.45	      /* 最小增益 */
 #define COLOR_MIN_VALUE 190.0 /* 最亮通道至少达到的值 */
 #define COLOR_MAX_GAIN 8.0    /* 增益上限，避免放大接近纯黑像素的噪点 */
-/* 字符边缘密集，CRF 26 配合暗场自适应量化控制体积。 */
+/* 字符边缘密集，CRF 29 配合去块滤波与关闭心理视觉控制体积。 */
 #define X264_PRESET "veryfast"
-#define X264_CRF "26"
-#define X264_PARAMS "colorprim=bt709:transfer=bt709:colormatrix=bt709:aq-mode=3"
+#define X264_CRF "29"
+#define X264_PARAMS                                                            \
+	"colorprim=bt709:transfer=bt709:colormatrix=bt709:aq-mode=1:"          \
+	"psy-rd=0,0:deblock=1,1"
 /* 跨帧稳定：候选字形与上一帧的字形只差这么几档墨量时沿用上一帧的字形。
- * 95 个字形均匀覆盖 0..1 的墨量，2 档约等于 2% 的浓淡差，肉眼不可辨，却能
+ * 95 个字形均匀覆盖 0..1 的墨量，3 档约等于 3% 的浓淡差，肉眼不可辨，却能
  * 去掉亮度在档位边界抖动引起的逐帧翻字。可用 -D 覆盖，便于测量收益。 */
 #ifndef GLYPH_HOLD_TOLERANCE
-#define GLYPH_HOLD_TOLERANCE 2
+#define GLYPH_HOLD_TOLERANCE 3
 #endif /* GLYPH_HOLD_TOLERANCE */
+#ifndef COLOR_HOLD_TOLERANCE
+#define COLOR_HOLD_TOLERANCE 12
+#endif /* COLOR_HOLD_TOLERANCE */
 #define TIER_COUNT 3
 /* 实测成本：每百万像素每秒所占 CPU 秒，预算按在线核心估算。 */
 #define SW_CPU_PER_MPX 0.10
