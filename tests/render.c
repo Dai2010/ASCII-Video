@@ -3,10 +3,13 @@
 /* 五种字形尺寸与字符/色块渲染的基线校验，期望值来自重构前实现。 */
 #include "glyph.h"
 #include "render.h"
+#include "terminal_frame.h"
+#include "ui_text.h"
 #include "util.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <inttypes.h>
 
 static uint64_t hash_bytes(uint64_t hash, const void *data, size_t bytes)
@@ -78,6 +81,61 @@ static void check_hold(void)
 	free(atlas.masks);
 }
 
+/*
+ * check_terminal_and_utf8 - 校验终端帧字形稳定与截断 UTF-8 边界安全。
+ */
+static void check_terminal_and_utf8(void)
+{
+	struct glyph_atlas atlas = {0};
+	struct render_memory memory = {0};
+	struct terminal_frame frame = {0};
+	struct strbuf sb = {0};
+	uint8_t cell[3];
+	char *trunc;
+	int first = -1;
+	int level;
+
+	assert(miku_atlas_build(&atlas, 8, 16) == 0);
+	assert(miku_render_memory_init(&memory, 1) == 0);
+	for (level = 0; level < 128; level++) {
+		first = atlas.lut[miku_gamma_lut[level]];
+		if (first != atlas.lut[miku_gamma_lut[level + 2]] &&
+		    abs(first - atlas.lut[miku_gamma_lut[level + 2]]) <=
+			    GLYPH_HOLD_TOLERANCE)
+			break;
+	}
+	assert(level < 128);
+	frame = (struct terminal_frame){
+		.cells = cell,
+		.atlas = &atlas,
+		.memory = &memory,
+		.cols = 1,
+		.rows = 1,
+		.style = STYLE_CHAR,
+	};
+	cell[0] = cell[1] = cell[2] = (uint8_t)level;
+	assert(miku_terminal_frame_build(&sb, &frame) == 0);
+	assert(memory.glyph[0] == first);
+	cell[0] = cell[1] = cell[2] = (uint8_t)(level + 2);
+	assert(miku_terminal_frame_build(&sb, &frame) == 0);
+	assert(memory.glyph[0] == first);
+
+	trunc = malloc(2);
+	assert(trunc != NULL);
+	trunc[0] = (char)0xE4;
+	trunc[1] = '\0';
+	assert(miku_ui_text_width(trunc) == 1);
+	sb.len = 0;
+	miku_ui_add_text_tail(&sb, "一二三四五", 5);
+	assert(sb.len == strlen("…四五"));
+	assert(memcmp(sb.buf, "…四五", sb.len) == 0);
+
+	free(trunc);
+	free(sb.buf);
+	miku_render_memory_free(&memory);
+	free(atlas.masks);
+}
+
 int main(void)
 {
 	struct glyph_atlas atlas = {0};
@@ -98,6 +156,7 @@ int main(void)
 
 	miku_build_gamma_lut();
 	check_hold();
+	check_terminal_and_utf8();
 	for (i = 0; i < sizeof(cells); i++)
 		cells[i] = (uint8_t)(i * 37 + 11);
 	for (n = 0; n < 5; n++) {

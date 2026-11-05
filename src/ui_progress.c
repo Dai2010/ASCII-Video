@@ -352,10 +352,6 @@ int miku_ui_convert(struct ui_config *st, int cols, struct convert_outcome *res)
 	const char *quality =
 		quality_names[(unsigned int)st->quality < 5 ? st->quality : 0];
 
-	if (st->style == STYLE_BLOCK)
-		setenv("MIKU_NO_HW", "0", 1);
-	unsetenv("MIKU_NO_HW");
-
 	memset(&pg, 0, sizeof pg);
 	pg.res = res;
 	pg.st = st;
@@ -371,7 +367,8 @@ int miku_ui_convert(struct ui_config *st, int cols, struct convert_outcome *res)
 	miku_ui_draw_note("正在读取视频信息、探测编码器…",
 			  "首次运行会真编几帧试每个候选，可能要几秒");
 
-	log = miku_xasprintf("%s/miku-ui.log", miku_temp_dir());
+	log = miku_xasprintf("%s/miku-ui-%ld.log", miku_temp_dir(),
+			     (long)getpid());
 	saved = -1;
 	if (log)
 		ui_log_open(log, &saved);
@@ -392,6 +389,8 @@ int miku_ui_convert(struct ui_config *st, int cols, struct convert_outcome *res)
 
 	if (!ok) {
 		if (pg.cancelled) {
+			if (log)
+				remove(log);
 			miku_ui_status(st, "已取消，半成品已删除");
 		} else {
 			char tail[240];
@@ -403,6 +402,8 @@ int miku_ui_convert(struct ui_config *st, int cols, struct convert_outcome *res)
 					       log ? log : "日志");
 			}
 		}
+	} else if (log) {
+		remove(log);
 	}
 	free(log);
 	return (ok) ? 0 : -EIO;

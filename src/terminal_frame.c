@@ -54,9 +54,12 @@ static int append_color(struct strbuf *buffer, struct rgb color,
  */
 static int append_cell(struct strbuf *buffer,
 		       const struct terminal_frame *frame, const uint8_t *pixel,
-		       struct rgb colors[2])
+		       size_t slot, struct rgb colors[2])
 {
+	struct render_memory *memory = frame->memory;
 	int level;
+	int glyph;
+	int delta;
 	int ret;
 
 	ret = append_color(buffer, miku_cell_color(pixel), &colors[0], 0);
@@ -77,8 +80,17 @@ static int append_cell(struct strbuf *buffer,
 	if (!(miku_sb_reserve(buffer, 1) == 0))
 		return -ENOMEM;
 	level = miku_pixel_level(pixel);
-	buffer->buf[buffer->len++] =
-		frame->atlas->chars[frame->atlas->lut[miku_gamma_lut[level]]];
+	glyph = frame->atlas->lut[miku_gamma_lut[level]];
+	if (memory && memory->primed) {
+		delta = glyph - memory->glyph[slot];
+		if (delta < 0)
+			delta = -delta;
+		if (delta <= GLYPH_HOLD_TOLERANCE)
+			glyph = memory->glyph[slot];
+	}
+	if (memory)
+		memory->glyph[slot] = (uint8_t)glyph;
+	buffer->buf[buffer->len++] = frame->atlas->chars[glyph];
 	return 0;
 }
 
@@ -96,13 +108,15 @@ static int append_row(struct strbuf *buffer, const struct terminal_frame *frame,
 	struct rgb colors[2] = {{-1, -1, -1}, {-1, -1, -1}};
 	const uint8_t *pixel;
 	int sample_row = frame->style == STYLE_BLOCK ? row * 2 : row;
+	size_t slot;
 	int x;
 	int ret;
 
 	for (x = 0; x < frame->cols; x++) {
+		slot = (size_t)row * frame->cols + x;
 		pixel = frame->cells +
 			((size_t)sample_row * frame->cols + x) * 3;
-		ret = append_cell(buffer, frame, pixel, colors);
+		ret = append_cell(buffer, frame, pixel, slot, colors);
 		if (ret)
 			return ret;
 	}
@@ -133,5 +147,7 @@ int miku_terminal_frame_build(struct strbuf *buffer,
 		if (ret)
 			return ret;
 	}
+	if (frame->memory)
+		frame->memory->primed = true;
 	return 0;
 }

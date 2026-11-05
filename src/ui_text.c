@@ -14,25 +14,31 @@
 #include <string.h>
 
 /*
- * ui_utf8_len - 根据 UTF-8 首字节估计编码长度。调用方保证字符串有效且完整
- * ，非法首字节按单字节处理。
+ * ui_utf8_len - 根据 UTF-8 首字节与后续延续字节返回安全步进长度。若多字节序
+ * 列被 NUL 或非延续字节截断，按单字节返回 1，防止跨过字符串末尾越界读取。
  *
- * @c: 借用的编码器候选，只读。
+ * @s: 非空且以 NUL 结尾的字节序列。
  *
- * 返回：估计的编码字节数，范围 1..4。
+ * 返回：安全的编码字节数，范围 1..4。
  * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
  */
-static int ui_utf8_len(unsigned char c)
+static int ui_utf8_len(const unsigned char *s)
 {
-	if (c < 0x80)
-		return 1;
+	unsigned char c = s[0];
+	int len = 1;
+	int i;
+
 	if ((c & 0xE0) == 0xC0)
-		return 2;
-	if ((c & 0xF0) == 0xE0)
-		return 3;
-	if ((c & 0xF8) == 0xF0)
-		return 4;
-	return 1;
+		len = 2;
+	else if ((c & 0xF0) == 0xE0)
+		len = 3;
+	else if ((c & 0xF8) == 0xF0)
+		len = 4;
+	for (i = 1; i < len; ++i) {
+		if ((s[i] & 0xC0) != 0x80)
+			return 1;
+	}
+	return len;
 }
 
 /*
@@ -97,7 +103,7 @@ int miku_ui_text_width(const char *s)
 	int w = 0;
 	const unsigned char *p = (const unsigned char *)s;
 	while (*p) {
-		const int len = ui_utf8_len(*p);
+		const int len = ui_utf8_len(p);
 		w += ui_cell_width(ui_codepoint(p, len));
 		p += len;
 	}
@@ -120,7 +126,7 @@ void miku_ui_add_text(struct strbuf *sb, const char *s, int max_w)
 	const unsigned char *p = (const unsigned char *)s;
 	int used = 0;
 	while (*p) {
-		const int len = ui_utf8_len(*p);
+		const int len = ui_utf8_len(p);
 		const int w = ui_cell_width(ui_codepoint(p, len));
 		if (max_w >= 0 && used + w > max_w)
 			break;
@@ -147,12 +153,19 @@ void miku_ui_add_text(struct strbuf *sb, const char *s, int max_w)
 void miku_ui_add_text_tail(struct strbuf *sb, const char *s, int max_w)
 {
 	const unsigned char *p = (const unsigned char *)s;
+	int remain;
+	int len;
+
 	if (max_w < 2) {
 		miku_ui_add_text(sb, s, max_w);
 		return;
 	}
-	while (*p && miku_ui_text_width((const char *)p) > max_w - 1)
-		p += ui_utf8_len(*p);
+	remain = miku_ui_text_width(s);
+	while (*p && remain > max_w - 1) {
+		len = ui_utf8_len(p);
+		remain -= ui_cell_width(ui_codepoint(p, len));
+		p += len;
+	}
 	if (p != (const unsigned char *)s)
 		miku_sb_addf(sb, "…");
 	miku_ui_add_text(sb, (const char *)p, max_w - 1);
@@ -186,10 +199,12 @@ int miku_ui_center_col(int width, int cols)
  */
 void miku_ui_pad(struct strbuf *sb, int n)
 {
-	int i;
-
-	for (i = 0; i < n; ++i)
-		miku_sb_addf(sb, " ");
+	if (n <= 0)
+		return;
+	if (miku_sb_reserve(sb, (size_t)n) != 0)
+		return;
+	memset(sb->buf + sb->len, ' ', (size_t)n);
+	sb->len += (size_t)n;
 }
 
 /*

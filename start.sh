@@ -183,7 +183,7 @@ install_pkgs() {
                         $sudo yum install -y "$@"
                         ;;
                 pacman)
-                        $sudo pacman -Sy --needed --noconfirm "$@"
+                        $sudo pacman -S --needed --noconfirm "$@"
                         ;;
                 *)
                         return 1

@@ -118,6 +118,7 @@ static int play_poll_key(void)
  */
 struct playback {
 	struct glyph_atlas atlas;
+	struct render_memory memory;
 	struct terminal_frame frame;
 	struct strbuf buffer;
 	FILE *decoder;
@@ -310,6 +311,7 @@ static void playback_release(struct playback *play)
 	play_restore_term();
 	if (play->decoder)
 		pclose(play->decoder);
+	miku_render_memory_free(&play->memory);
 	free(play->atlas.masks);
 	free(play->cells);
 	free(play->buffer.buf);
@@ -338,9 +340,16 @@ int miku_play_terminal(const struct playback_options *options,
 	play.frame.atlas = &play.atlas;
 	playback_grid(&play.frame, options->cols, info);
 	miku_build_gamma_lut();
-	if (options->style == STYLE_CHAR &&
-	    miku_atlas_build(&play.atlas, 8, 16) != 0)
-		return -ENOMEM;
+	if (options->style == STYLE_CHAR) {
+		if (miku_atlas_build(&play.atlas, 8, 16) != 0 ||
+		    miku_render_memory_init(&play.memory,
+					    (size_t)play.frame.cols *
+						    play.frame.rows) != 0) {
+			playback_release(&play);
+			return -ENOMEM;
+		}
+		play.frame.memory = &play.memory;
+	}
 	ret = playback_decoder(&play, options->input);
 	if (!ret) {
 		g_play_stop = 0;

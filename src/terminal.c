@@ -7,25 +7,7 @@
 
 #include "terminal.h"
 
-#include <dirent.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <math.h>
-#include <signal.h>
-#include <stdarg.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/select.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <termios.h>
-#include <time.h>
 #include <unistd.h>
 
 /*

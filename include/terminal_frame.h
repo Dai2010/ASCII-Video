@@ -10,6 +10,7 @@
 struct terminal_frame {
 	const uint8_t *cells;
 	const struct glyph_atlas *atlas;
+	struct render_memory *memory;
 	int cols;
 	int rows;
 	int style;

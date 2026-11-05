@@ -208,7 +208,7 @@ void miku_ui_edit_field(struct ui_config *st, int which, const char *title)
 	}
 	/*
 	 * 输出名一旦被手动改成别的名字，就不再随输入或风格自动改写；留空或
-	 * 仍等于派生名时视为自动。
+	 * 仍等于派生名时视为自动。输入手打改变后，自动输出名同步刷新。
 	 */
 	if (which == CFG_OUTPUT) {
 		char derived[UI_PATH_MAX];
@@ -216,6 +216,12 @@ void miku_ui_edit_field(struct ui_config *st, int which, const char *title)
 		miku_ui_derive_output(st->input, st->style, derived,
 				      sizeof derived);
 		st->output_auto = !buf[0] || strcmp(buf, derived) == 0;
+	} else if (which == CFG_INPUT && st->output_auto) {
+		if (st->input[0])
+			miku_ui_derive_output(st->input, st->style, st->output,
+					      sizeof st->output);
+		else
+			st->output[0] = '\0';
 	}
 }
 
