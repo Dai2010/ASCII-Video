@@ -120,6 +120,8 @@ static int append_row(struct strbuf *buffer, const struct terminal_frame *frame,
 		if (ret)
 			return ret;
 	}
+	if (row == frame->rows - 1)
+		return (miku_sb_addf(buffer, "\x1b[0m") == 0) ? 0 : -ENOMEM;
 	return (miku_sb_addf(buffer, "\x1b[0m\r\n") == 0) ? 0 : -ENOMEM;
 }
 

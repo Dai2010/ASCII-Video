@@ -45,6 +45,7 @@ make
 
     make                       编译 build/miku
     make test                  编译并运行 tests/ 中的单元测试
+    make line                  只读检查源码与脚本的八列缩进
     make format-check          clang-format 与 tests/style.py 检查
     make clean                 删除 BUILD_DIR 中的目标文件与可执行文件
     make help                  查看目标与变量
@@ -52,7 +53,7 @@ make
 可覆盖的变量：
 
 - ``CC``：编译器，默认 cc。
-- ``OPT``：优化与调试选项，默认 ``-O2 -g``。需要改优化级别时用 ``OPT``，不要用 ``CFLAGS``，否则会丢掉 Makefile 里的警告设置。
+- ``OPT``：优化与调试选项，默认 ``-O3 -g``。需要改优化级别时用 ``OPT``，不要用 ``CFLAGS``，否则会丢掉 Makefile 里的警告设置。
 - ``WERROR``：默认 ``-Werror``。在未知编译器上遇到新警告时，可设为空。
 - ``BUILD_DIR``：产物目录，默认 build。
 - ``PYTHON``：tests/style.py 使用的解释器。

@@ -2,8 +2,10 @@
 /* Copyright (C) 2026 Kuimuztion */
 /* 五种字形尺寸与字符/色块渲染的基线校验，期望值来自重构前实现。 */
 #include "glyph.h"
+#include "constants.h"
 #include "render.h"
 #include "terminal_frame.h"
+#include "ui_settings.h"
 #include "ui_text.h"
 #include "util.h"
 #include <assert.h>
@@ -130,6 +132,27 @@ static void check_terminal_and_utf8(void)
 	assert(sb.len == strlen("…四五"));
 	assert(memcmp(sb.buf, "…四五", sb.len) == 0);
 
+	cell[0] = 180;
+	cell[1] = 180;
+	cell[2] = 180;
+	assert(miku_cell_color(cell).r < 200);
+	cell[0] = 175;
+	cell[1] = 195;
+	cell[2] = 196;
+	assert(miku_cell_color(cell).b - miku_cell_color(cell).r >= 30);
+
+	assert(miku_settings_get_font_size() >= 4.0);
+	assert(miku_settings_get_font_size() <= 12.5);
+	miku_settings_set_font_size(3.0);
+	assert(miku_settings_get_font_size() == 4.0);
+	miku_settings_set_font_size(15.0);
+	assert(miku_settings_get_font_size() == 12.5);
+	miku_settings_set_font_size(7.2);
+	assert(miku_settings_get_font_size() == 7.0);
+	miku_settings_set_font_size(6.0);
+	assert(miku_settings_get_font_size() == 6.0);
+	remove(UI_SETTINGS_FILE);
+
 	free(trunc);
 	free(sb.buf);
 	miku_render_memory_free(&memory);
@@ -150,9 +173,9 @@ int main(void)
 	int n;
 	struct render_grid grid = {0};
 	const uint64_t expected[] = {
-		UINT64_C(6887403445357186851), UINT64_C(4341286001493870571),
-		UINT64_C(6448623448790527072), UINT64_C(10292222191830578188),
-		UINT64_C(17857590708387110276)};
+		UINT64_C(803704655914170639), UINT64_C(4298418238200983221),
+		UINT64_C(4092220845012865912), UINT64_C(4821808165070991088),
+		UINT64_C(7031257936295492962)};
 
 	miku_build_gamma_lut();
 	check_hold();

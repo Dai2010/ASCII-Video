@@ -114,12 +114,15 @@ static int convert_commands(struct convert_job *job, int sample_rows)
 {
 	char *input = miku_shell_quote(job->request->input);
 	char *output = miku_shell_quote(job->request->output);
+	int rot = (job->profile->width < job->profile->height &&
+		   job->info->width >= job->info->height);
+	const char *trans = rot ? "transpose=1," : "";
 	int ret = -ENOMEM;
 
 	if (input && output) {
 		job->decode_command = miku_xasprintf(
-			"ffmpeg -nostdin -v error -i %s -an -sn -vf 'scale=%d:%d:flags=area,fps=%ld/%ld' -f rawvideo -pix_fmt rgb24 pipe:1",
-			input, job->layout.cols, sample_rows,
+			"ffmpeg -nostdin -v error -i %s -an -sn -vf '%sscale=%d:%d:flags=area,fps=%ld/%ld' -f rawvideo -pix_fmt rgb24 pipe:1",
+			input, trans, job->layout.cols, sample_rows,
 			job->info->fps_num, job->info->fps_den);
 		job->encode_command = encode_command(job, input, output);
 		if (job->decode_command && job->encode_command)
@@ -177,13 +180,17 @@ static int convert_prepare(struct convert_job *job)
 {
 	int rows;
 	int ret;
+	int rot = (job->profile->width < job->profile->height &&
+		   job->info->width >= job->info->height);
+	int v_w = rot ? job->info->height : job->info->width;
+	int v_h = rot ? job->info->width : job->info->height;
 
 	if (!miku_command_exists("ffmpeg") || !miku_command_exists("ffprobe")) {
 		fprintf(stderr, "未找到 ffmpeg / ffprobe，请先安装 ffmpeg\n");
 		return -ENOENT;
 	}
-	miku_compute_layout(job->profile, job->request->cols, job->info->width,
-			    job->info->height, &job->layout);
+	miku_compute_layout(job->profile, job->request->cols, v_w, v_h,
+			    &job->layout);
 	miku_build_gamma_lut();
 	if (job->request->style == STYLE_CHAR) {
 		ret = miku_atlas_build(&job->atlas, job->layout.cell_w,

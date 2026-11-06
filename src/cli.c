@@ -270,7 +270,7 @@ static int cli_play(const struct cli_options *options,
 {
 	struct playback_options playback = {
 		.input = options->request.input,
-		.cols = options->request.cols,
+		.cols = options->width_given ? options->request.cols : 0,
 		.with_audio = !options->mute,
 		.style = options->request.style,
 	};

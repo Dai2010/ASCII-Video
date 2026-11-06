@@ -13,38 +13,70 @@
 #include <stdlib.h>
 
 /*
- * miku_cell_color - 将源 RGB24 像素提高饱和度后整体缩放，避免逐通道截断改
- * 变色相。
+ * render_white_gain - 对颜色的白底分量（三通道最小值）做高光软膝衰减。
+ * 暗部维持与色度相同的增益以保住黑底字符可见度；亮部与近白区域压低白底
+ * 放大，防止浅粉、浅青、肤色和高光白区被推上 255 变成一片惨白。
+ *
+ * @low: 饱和度提升后的三通道最小值。
+ * @gain: 色度主通道的目标增益。
+ *
+ * 返回：白底分量的实际缩放系数。
+ * 线程约束：纯计算函数，无共享可变状态，可并发调用。
+ */
+static double render_white_gain(double low, double gain)
+{
+	const double span = WHITE_FLOOR_CEIL - WHITE_FLOOR_KNEE;
+
+	if (low <= WHITE_FLOOR_KNEE)
+		return gain;
+	if (low <= WHITE_FLOOR_CEIL)
+		return 1.0 + (gain - 1.0) * ((WHITE_FLOOR_CEIL - low) / span);
+	return (WHITE_FLOOR_CEIL +
+		(low - WHITE_FLOOR_CEIL) * WHITE_FLOOR_SLOPE) /
+	       low;
+}
+
+/*
+ * miku_cell_color - 将源 RGB24 像素提高饱和度后分离白底与色度缩放，避免高
+ * 光区域过曝漂白或改变色相。
  * pixel 借用至少三个字节；返回颜色不依赖输入内存的生命周期。
  * 近黑像素直接返回黑色，避免放大压缩噪点。无共享可变状态。
  *
  * @pixel: 至少三个字节的 RGB24 采样点，仅借用。
  *
+ * 返回：提亮并防漂白后的 RGB 颜色值。
+ * 线程约束：纯计算函数，无共享可变状态，可并发调用。
  */
 struct rgb miku_cell_color(const uint8_t *pixel)
 {
 	double gray;
 	double channels[3];
 	double peak;
+	double low;
 	double target;
 	double gain;
+	double wgain;
 	struct rgb color = {0};
 	int i;
 
 	gray = RED_WEIGHT * pixel[0] + GREEN_WEIGHT * pixel[1] +
 	       BLUE_WEIGHT * pixel[2];
-	for (i = 0; i < 3; i++)
+	for (i = 0; i < 3; ++i)
 		channels[i] = miku_dmax(0, gray + (pixel[i] - gray) *
 							   SATURATION_BOOST);
 	peak = miku_dmax(channels[0], miku_dmax(channels[1], channels[2]));
 	if (peak < 1.0)
 		return color;
+	low = miku_dmin(channels[0], miku_dmin(channels[1], channels[2]));
 	target = miku_dmax(peak * COLOR_GAIN,
 			   miku_dmin(COLOR_MIN_VALUE, peak * COLOR_MAX_GAIN));
 	gain = miku_dmin(target, 255.0) / peak;
-	color.r = (int)miku_dmin((int)(channels[0] * gain + 0.5), 255);
-	color.g = (int)miku_dmin((int)(channels[1] * gain + 0.5), 255);
-	color.b = (int)miku_dmin((int)(channels[2] * gain + 0.5), 255);
+	wgain = render_white_gain(low, gain);
+	for (i = 0; i < 3; ++i)
+		channels[i] = low * wgain + (channels[i] - low) * gain;
+	color.r = (int)miku_dmin((int)(channels[0] + 0.5), 255);
+	color.g = (int)miku_dmin((int)(channels[1] + 0.5), 255);
+	color.b = (int)miku_dmin((int)(channels[2] + 0.5), 255);
 	return color;
 }
 

@@ -423,13 +423,8 @@ void miku_ui_play(struct ui_config *st, const struct video_info *vp)
 {
 	int fps;
 	int src;
-
 	int cols = st->cols_want;
-	if (cols == 0) {
-		const int tc = miku_terminal_columns();
-		cols = tc > 0 ? tc : DEFAULT_ASCII_WIDTH;
-		cols = miku_clamp_int(cols, MIN_ASCII_WIDTH, MAX_ASCII_WIDTH);
-	}
+
 	fps = st->fps > 0 ? st->fps
 			  : (int)lround((double)vp->fps_num / vp->fps_den);
 	src = (int)lround((double)vp->fps_num / vp->fps_den);

@@ -7,6 +7,7 @@
 
 #include "video.h"
 #include "encoder.h"
+#include "terminal.h"
 #include "util.h"
 
 #include <errno.h>
@@ -15,19 +16,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-const char *miku_ratio_names[RATIO_COUNT] = {"原画", "16:9", "9:16",
-					     "1:1",  "4:3",  "21:9"};
+const char *miku_ratio_names[RATIO_COUNT] = {"自动铺满", "16:9", "9:16", "1:1",
+					     "4:3",	 "3:4",	 "21:9"};
 
-static const double ratio_values[RATIO_COUNT] = {0.0, 16.0 / 9.0, 9.0 / 16.0,
-						 1.0, 4.0 / 3.0,  21.0 / 9.0};
+static const double ratio_values[RATIO_COUNT] = {
+	0.0, 16.0 / 9.0, 9.0 / 16.0, 1.0, 4.0 / 3.0, 3.0 / 4.0, 21.0 / 9.0};
 
 /*
- * ratio_dims - 按画面比例计算偶数尺寸，避免不支持 yuv420p 的奇数尺寸；源比
- * 例仅在 ratio=0 时使用。
+ * ratio_dims - 按画面比例计算偶数尺寸，避免不支持 yuv420p 的奇数尺寸；
+ * ratio=0（自动铺满）智能检测终端形态，手机竖屏横向满格，电脑横屏整屏铺满；
+ * 竖屏比例（ar < 1.0）以 base_h 为短边计算高度，横屏比例以 base_h 为高度。
  *
  * @ratio: 画面比例索引，范围为 0..RATIO_COUNT-1。
  * @source: 借用的源视频信息。
- * @base_h: 计算比例时使用的基准高度，单位像素。
+ * @base_h: 计算比例时使用的基准尺寸（横屏为高度，竖屏为宽度），单位像素。
  * @w: 宽度像素值或接收宽度的输出地址。
  * @h: 高度像素值或接收高度的输出地址。
  *
@@ -36,10 +38,37 @@ static const double ratio_values[RATIO_COUNT] = {0.0, 16.0 / 9.0, 9.0 / 16.0,
 static void ratio_dims(int ratio, const struct video_info *source, int base_h,
 		       int *w, int *h)
 {
-	const double ar = ratio > 0 ? ratio_values[ratio]
-				    : (double)source->width / source->height;
-	int ww = (int)lround(base_h * ar) & ~1;
-	int hh = base_h & ~1;
+	double ar;
+	int ww;
+	int hh;
+	int tc = miku_terminal_columns();
+	int tr = miku_terminal_rows();
+	double term_ar = (tc > 0 && tr > 0) ? (double)tc / (tr * 2.0) : 0.0;
+	double src_ar = (double)source->width / source->height;
+
+	if (ratio == 0) {
+		/*
+		 * 自动铺满：终端为手机 9:16 竖屏时，横屏视频旋转 90 度铺满竖屏；
+		 * 电脑横屏时直接对齐当前终端比例。
+		 */
+		if (term_ar > 0.0)
+			ar = term_ar;
+		else
+			ar = src_ar;
+	} else if (ratio == 3) {
+		ar = 1.0;
+	} else if (ratio > 0) {
+		ar = ratio_values[ratio];
+	} else {
+		ar = src_ar;
+	}
+	if (ar < 1.0) {
+		ww = base_h & ~1;
+		hh = (int)lround((double)base_h / ar) & ~1;
+	} else {
+		ww = (int)lround(base_h * ar) & ~1;
+		hh = base_h & ~1;
+	}
 	/* 只防「小到 yuv420p 装不下」，绝不上采样 —— 原画档要的就是源的原始尺寸
 	 */
 	if (ww < 64) {
@@ -86,8 +115,9 @@ int miku_choose_profile_ex(const char *quality, int ratio, int fps_want,
 	 */
 	if (strcmp(quality, "src") == 0) {
 		int fps;
+		int edge = vi->width < vi->height ? vi->width : vi->height;
 
-		ratio_dims(ratio, vi, vi->height & ~1, &w, &h);
+		ratio_dims(ratio, vi, edge & ~1, &w, &h);
 		/* 用户显式指定的帧率优先，即使高于源帧率也照此输出 */
 		if (fps_want > 0)
 			fps = fps_want;

@@ -101,7 +101,8 @@ static const char *ui_lyrics[] = {
 						  */
 };
 
-static const char *ui_menu[3] = {"视频转换", "视频播放", "退出"};
+static const char *ui_menu[5] = {"视频转换", "视频播放", "已有视频", "设置",
+				 "退出"};
 
 /*
  * ui_home_draw - 欢迎页只负责绘制，菜单焦点和歌词由调用方借用传入。
@@ -139,7 +140,7 @@ static void ui_home_draw(const char *lyric, int focus)
 	miku_sb_addf(&sb, UI_RESET);
 
 	miku_ui_hit_reset();
-	menu_top = logo_top + 8;
+	menu_top = logo_top + (rows > 22 ? 8 : 7);
 	menu_left = miku_ui_center_col(16, cols);
 	for (i = 0; i < UI_MENU_COUNT; ++i) {
 		const int row = menu_top + i * 2;
@@ -167,9 +168,9 @@ static void ui_home_draw(const char *lyric, int focus)
 
 /*
  * miku_ui_home - 维护欢迎菜单焦点，支持方向键、滚轮、数字键和点击。返回转
- * 换、播放或退出菜单索引，歌词每次进入时选择一次。
+ * 换、播放、已有视频、设置或退出菜单索引，歌词每次进入时选择一次。
  *
- * 返回：0 转换，1 播放，2 退出。
+ * 返回：0 转换，1 播放，2 已有视频，3 设置，4 退出。
  * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
  */
 int miku_ui_home(void)
@@ -186,7 +187,7 @@ int miku_ui_home(void)
 		if (k == UI_NONE)
 			continue;
 		if (k == 'q' || k == 27 || k == 3)
-			return 2;
+			return 4;
 		if (k == UI_UP || k == 'k') {
 			focus = (focus + UI_MENU_COUNT - 1) % UI_MENU_COUNT;
 			continue;
@@ -209,7 +210,7 @@ int miku_ui_home(void)
 			}
 			continue;
 		}
-		if (k >= '1' && k <= '3') { /* 数字键直选，手机键盘也方便 */
+		if (k >= '1' && k <= '5') { /* 数字键直选，手机键盘也方便 */
 			focus = k - '1';
 			chosen = focus;
 			continue;
@@ -217,5 +218,5 @@ int miku_ui_home(void)
 		if (k == '\r' || k == '\n')
 			chosen = focus;
 	}
-	return chosen < 0 ? 2 : chosen;
+	return chosen < 0 ? 4 : chosen;
 }

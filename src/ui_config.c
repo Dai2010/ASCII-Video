@@ -309,7 +309,7 @@ static void ui_cfg_value(const struct ui_config *st, int item, char *out,
 		if (st->cols_want > 0) {
 			snprintf(out, cap, "%d 列", st->cols_want);
 		} else {
-			snprintf(out, cap, "自动（终端 %d 列）",
+			snprintf(out, cap, "1:1 铺满（终端 %d 列）",
 				 miku_terminal_columns());
 		}
 		break;

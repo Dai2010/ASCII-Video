@@ -9,8 +9,10 @@
 #include "terminal.h"
 #include "ui_config.h"
 #include "ui_home.h"
+#include "ui_library.h"
 #include "ui_picker.h"
 #include "ui_progress.h"
+#include "ui_settings.h"
 #include "ui_terminal.h"
 #include "util.h"
 #include "video.h"
@@ -54,9 +56,7 @@ static int ui_start(struct ui_config *st, int kind)
 	if (kind == 0) {
 		int tc;
 
-		if (!st->output[0] || st->output_auto)
-			miku_ui_derive_output(st->input, st->style, st->output,
-					      sizeof st->output);
+		miku_ui_prepare_output(st);
 		if (strcmp(st->input, st->output) == 0) {
 			miku_ui_status(st, "输出不能和输入同名");
 			return 0;
@@ -82,9 +82,12 @@ static int ui_start(struct ui_config *st, int kind)
 	if (!(miku_ui_convert(st, cols, &res) == 0))
 		return 0;
 	elapsed = miku_now_seconds() - t0;
+	miku_ui_library_record(st, cols, &res);
 
 	choice = miku_ui_wait_done(st, &res, elapsed);
 	if (choice == 1) {
+		res.info.width = res.prof.width;
+		res.info.height = res.prof.height;
 		miku_ui_play(st, &res.info);
 		return 0;
 	}
@@ -235,8 +238,18 @@ int miku_tui_main(void)
 
 	for (;;) {
 		const int choice = miku_ui_home();
-		if (choice == 2 || miku_g_ui_stop)
+		if (choice == 4 || miku_g_ui_stop)
 			break;
+		if (choice == 2) {
+			if (miku_ui_library() == 1)
+				break;
+			continue;
+		}
+		if (choice == 3) {
+			if (miku_ui_settings() == 1)
+				break;
+			continue;
+		}
 		if (ui_config_screen(&st[choice], choice) == 1)
 			break;
 	}

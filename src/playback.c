@@ -13,6 +13,7 @@
 #include "strbuf.h"
 #include "terminal.h"
 #include "terminal_frame.h"
+#include "ui_settings.h"
 #include "util.h"
 
 #include <errno.h>
@@ -30,22 +31,67 @@ static struct termios g_saved_term;
 
 static int g_term_raw = 0;
 
+static int g_font_scaled = 0;
+
 static volatile sig_atomic_t g_play_stop = 0;
 
 /*
- * play_restore_term - 恢复播放前保存的 termios、颜色和光标。原始模式标志避
- * 免重复恢复覆盖下一阶段的终端状态。
+ * play_set_font - 在 Kitty 终端播放时将当前窗口字号临时调整为设置的大小，
+ * 并简短等待窗口重算行列尺寸，使后续网格计算直接采用缩小后的高密度列数。
+ *
+ * 返回：无；只更新终端状态与恢复标志。
+ * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
+ */
+static void play_set_font(void)
+{
+	struct timespec delay = {0, 50000000};
+	const char *term = getenv("TERM");
+	char cmd[128];
+	double size;
+
+	if (!isatty(STDOUT_FILENO))
+		return;
+	if (!getenv("KITTY_PID") && !getenv("KITTY_WINDOW_ID") &&
+	    (!term || !strstr(term, "kitty")))
+		return;
+	size = miku_settings_get_font_size();
+	snprintf(cmd, sizeof(cmd),
+		 "\x1bP@kitty-cmd{\"cmd\":\"set-font-size\","
+		 "\"version\":[0,26,0],\"no_response\":true,"
+		 "\"payload\":{\"size\":%g}}\x1b\\",
+		 size);
+	fputs(cmd, stdout);
+	fflush(stdout);
+	g_font_scaled = 1;
+	nanosleep(&delay, NULL);
+}
+
+/*
+ * play_restore_term - 恢复播放前保存的 termios、Kitty 默认字号、颜色和光标。
+ * 原始模式与字号标志避免重复恢复覆盖下一阶段的终端状态。
  *
  * 返回：无；只执行上述更新，不转移借用对象所有权。
  * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
  */
 static void play_restore_term(void)
 {
+	struct timespec delay = {0, 30000000};
+
 	if (g_term_raw) {
 		tcsetattr(STDIN_FILENO, TCSANOW, &g_saved_term);
 		g_term_raw = 0;
 	}
-	fputs("\x1b[0m\x1b[?25h", stdout); /* 复位颜色、恢复光标 */
+	if (g_font_scaled) {
+		g_font_scaled = 0;
+		fputs("\x1bP@kitty-cmd{\"cmd\":\"set-font-size\","
+		      "\"version\":[0,26,0],\"no_response\":true,"
+		      "\"payload\":{\"size\":0}}\x1b\\",
+		      stdout);
+		fflush(stdout);
+		nanosleep(&delay, NULL);
+	}
+	/* 复位换行、颜色、恢复光标 */
+	fputs("\x1b[?7h\x1b[0m\x1b[?25h", stdout);
 	fflush(stdout);
 }
 
@@ -126,38 +172,72 @@ struct playback {
 	size_t cell_bytes;
 	int fps;
 	int audio;
+	int transpose;
 	double origin;
 	char socket_path[256];
 };
 
 /*
- * playback_grid - 按终端宽高夹紧网格，保留一行余量。终端字符高宽比约为 2:1
- * ，
- * 因此纵向格数为列数除视频宽高比再除以 2。三次夹紧沿用旧版布局。
+ * playback_grid - 计算终端播放网格尺寸与旋转方向。未指定列数时自动铺满：
+ * 若终端为手机竖屏形态且视频为横屏，自动顺时针旋转 90 度（transpose=1），
+ * 旋转后按竖屏比例 100% 满铺手机屏幕；桌面宽屏全屏满铺全部行列；
+ * 指定列数时按画面高宽比夹紧。
  *
- * @frame: 借用的终端采样帧和网格尺寸，不转移图集所有权。
- * @wanted: 请求列数，非正时跟随终端。
+ * @play: 单次播放状态，拥有本次解码资源。
+ * @wanted: 请求列数，非正时跟随终端自动铺满。
  * @info: 源视频信息，非 const 指针用于接收探测结果。
  *
  * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
  */
-static void playback_grid(struct terminal_frame *frame, int wanted,
+static void playback_grid(struct playback *play, int wanted,
 			  const struct video_info *info)
 {
+	struct terminal_frame *frame = &play->frame;
 	int cols = miku_terminal_columns();
 	int rows = miku_terminal_rows();
 	int max_rows;
 	int pass;
-	double aspect = (double)info->width / info->height;
+	double aspect;
+	double term_ar;
 
 	if (cols <= 0)
 		cols = 80;
 	if (rows <= 0)
 		rows = 24;
-	max_rows = rows > 2 ? rows - 1 : 1;
-	frame->cols = wanted > 0 ? wanted : cols;
-	if (frame->cols > cols)
+	max_rows = rows > 0 ? rows : 1;
+	term_ar = (double)cols / ((double)max_rows * 2.0);
+	aspect = (double)info->width / (info->height > 0 ? info->height : 1);
+
+	/*
+	 * 手机 9:16 竖屏终端播放横屏视频：顺时针旋转 90 度，横放即为全屏横屏。
+	 * 旋转后高宽互换，新比例为 1.0 / aspect。
+	 */
+	if (term_ar < 1.0 && aspect >= 1.0) {
+		play->transpose = 1;
+		aspect = 1.0 / aspect;
+	} else {
+		play->transpose = 0;
+	}
+
+	if (wanted <= 0) {
+		/* 电脑横屏终端播放竖屏视频：纵向铺满，列数按比例居中 */
+		if (term_ar >= 1.0 && aspect < 1.0) {
+			frame->rows = max_rows;
+			frame->cols =
+				(int)lround((double)max_rows * aspect * 2.0);
+			if (frame->cols > cols)
+				frame->cols = cols;
+			if (frame->cols < 8)
+				frame->cols = 8;
+			return;
+		}
+		/* 宽屏播横屏片或竖屏播竖向（含旋转后）片：1:1 满铺可见行列 */
 		frame->cols = cols;
+		frame->rows = max_rows;
+		return;
+	}
+
+	frame->cols = wanted > cols ? cols : wanted;
 	for (pass = 0; pass < 3; pass++) {
 		rows = (int)lround(frame->cols / aspect * 0.5);
 		if (rows <= max_rows)
@@ -188,6 +268,7 @@ static int playback_decoder(struct playback *play, const char *input)
 {
 	char *quoted;
 	char *command;
+	const char *trans = play->transpose ? "transpose=1," : "";
 	int rows = play->frame.rows;
 	int ret = 0;
 
@@ -202,8 +283,8 @@ static int playback_decoder(struct playback *play, const char *input)
 	if (!quoted)
 		return -ENOMEM;
 	command = miku_xasprintf(
-		"ffmpeg -nostdin -v error -i %s -an -sn -vf 'fps=%d,scale=%d:%d:flags=area' -f rawvideo -pix_fmt rgb24 pipe:1 2>/dev/null",
-		quoted, play->fps, play->frame.cols, rows);
+		"ffmpeg -nostdin -v error -i %s -an -sn -vf '%sfps=%d,scale=%d:%d:flags=area' -f rawvideo -pix_fmt rgb24 pipe:1 2>/dev/null",
+		quoted, trans, play->fps, play->frame.cols, rows);
 	free(quoted);
 	if (!command)
 		return -ENOMEM;
@@ -338,7 +419,8 @@ int miku_play_terminal(const struct playback_options *options,
 	play.fps = options->fps;
 	play.frame.style = options->style;
 	play.frame.atlas = &play.atlas;
-	playback_grid(&play.frame, options->cols, info);
+	play_set_font();
+	playback_grid(&play, options->cols, info);
 	miku_build_gamma_lut();
 	if (options->style == STYLE_CHAR) {
 		if (miku_atlas_build(&play.atlas, 8, 16) != 0 ||
@@ -357,10 +439,10 @@ int miku_play_terminal(const struct playback_options *options,
 		signal(SIGTERM, play_on_signal);
 		play_raw_mode();
 		atexit(play_restore_term);
-		fputs("\x1b[?25l\x1b[2J", stdout);
+		fputs("\x1b[?25l\x1b[?7l\x1b[2J", stdout);
 		playback_clock(&play, options->input, options->with_audio);
 		ret = playback_frames(&play);
-		fputs("\x1b[0m\r\n", stdout);
+		fputs("\x1b[?7h\x1b[0m\r\n", stdout);
 	}
 	playback_release(&play);
 	return ret;

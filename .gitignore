@@ -2,3 +2,5 @@
 /miku
 /work/
 /.venv/
+/.miku-library.tsv
+/.miku-settings.tsv

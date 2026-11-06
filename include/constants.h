@@ -15,12 +15,15 @@
 #define RED_WEIGHT 0.299
 #define GREEN_WEIGHT 0.587
 #define BLUE_WEIGHT 0.114
-/* gamma<1 偏向更密字形；颜色增益保持色相而非逐通道截断。 */
-#define CHAR_GAMMA 0.55
-#define SATURATION_BOOST 1.35
-#define COLOR_GAIN 1.45	      /* 最小增益 */
-#define COLOR_MIN_VALUE 190.0 /* 最亮通道至少达到的值 */
-#define COLOR_MAX_GAIN 8.0    /* 增益上限，避免放大接近纯黑像素的噪点 */
+/* gamma<1 偏向更密字形；颜色增益保持色相并压制高光白底防止漂白。 */
+#define CHAR_GAMMA 0.62
+#define SATURATION_BOOST 1.45
+#define COLOR_GAIN 1.25	       /* 最小增益 */
+#define COLOR_MIN_VALUE 170.0  /* 暗部最亮通道至少达到的值 */
+#define COLOR_MAX_GAIN 8.0     /* 增益上限，避免放大接近纯黑像素的噪点 */
+#define WHITE_FLOOR_KNEE 90.0  /* 白底分量软膝起点，高于此值开始压制白底增益 */
+#define WHITE_FLOOR_CEIL 160.0 /* 白底分量高光阈值，高于此值按斜率温和压缩 */
+#define WHITE_FLOOR_SLOPE 0.72 /* 高光白底压缩斜率，防止亮色和近白区域惨白 */
 /* 字符边缘密集，CRF 29 配合去块滤波与关闭心理视觉控制体积。 */
 #define X264_PRESET "veryfast"
 #define X264_CRF "29"
@@ -56,7 +59,7 @@
 #define FONT_SRC_H 32
 /* 每个编码器实际短片探测使用的帧数。 */
 #define PROBE_FRAMES 8
-#define RATIO_COUNT 6
+#define RATIO_COUNT 7
 #define STYLE_CHAR 0
 #define STYLE_BLOCK 1
 /* UI 专用键值避开单字节范围；行列坐标仍按终端的一基编号。 */
@@ -82,7 +85,14 @@
 #define UI_WARN "\x1b[33m"
 #define UI_MIKU "\x1b[38;2;126;255;96m" /* 葱绿 */
 #define UI_LYRIC_COUNT 12
-#define UI_MENU_COUNT 3
+#define UI_MENU_COUNT 5
+#define UI_LIBRARY_FILE ".miku-library.tsv"
+#define UI_LIBRARY_MAX 128
+#define UI_SETTINGS_FILE ".miku-settings.tsv"
+#define UI_FONT_SIZE_MIN 4.0
+#define UI_FONT_SIZE_MAX 12.5
+#define UI_FONT_SIZE_DEFAULT 6.0
+#define UI_FONT_SIZE_STEP 0.5
 
 enum {
 	CFG_INPUT = 0,

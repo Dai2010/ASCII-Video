@@ -4,7 +4,7 @@
 ``make test`` 会编译并运行下列测试，每个测试都有超时保护（需要 timeout 或 gtimeout）。
 
 - tests/playback.c：播放 IPC 的回归测试。直接包含 audio.c 复用实现，不启动音频设备。
-- tests/render.c：五种字形尺寸与字符、色块渲染的基线校验，期望值来自重构前的实现，用于确认渲染没有被意外改变。
+- tests/render.c：五种字形尺寸与字符、色块渲染的基线校验，以及跨帧稳定、终端帧字形稳定、UTF-8 截断边界与高光防漂白断言。
 - tests/buffer.c：strbuf 的容量边界测试。
 - tests/video.c 与 tests/video.py：用真实 MP4、MKV 和裸 H.264 验证帧数。
   覆盖视频流帧数、容器时长回退和未知总帧数，依赖 ffmpeg、ffprobe
