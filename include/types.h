@@ -118,7 +118,7 @@ struct ui_config {
 	char output[UI_PATH_MAX]; /* 输出路径，空串表示自动派生。 */
 	int output_auto;	  /* 非零表示输出名仍随输入与风格自动派生。 */
 	int style;		  /* STYLE_CHAR 或 STYLE_BLOCK。 */
-	int ratio;		  /* 比例索引，零表示源比例。 */
+	int ratio;		  /* 比例索引，零表示自动铺满。 */
 	int fps;		  /* 指定帧率，零表示跟随源。 */
 	int quality;		  /* 0 自动、1 原画、2 高、3 中、4 低。 */
 	int cols_want;		  /* 播放列数，零表示跟随终端。 */

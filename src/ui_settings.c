@@ -22,6 +22,20 @@ static double g_font_size = UI_FONT_SIZE_DEFAULT;
 static int g_settings_loaded = 0;
 
 /*
+ * ui_settings_path - 把配置目录与设置文件名拼成完整路径。
+ *
+ * @dst: 调用方持有的输出字符数组。
+ * @cap: 输出数组容量，单位字节，包含结尾 NUL 空间。
+ *
+ * 返回：无；只写入 dst。
+ * 线程约束：仅由主线程串行调用。
+ */
+static void ui_settings_path(char *dst, size_t cap)
+{
+	snprintf(dst, cap, "%s/%s", miku_config_dir(), UI_SETTINGS_FILE);
+}
+
+/*
  * ui_settings_load - 读取持久化设置文件，解析播放字号；若文件不存在或字段
  * 无效则保留默认值。
  *
@@ -30,11 +44,13 @@ static int g_settings_loaded = 0;
  */
 static void ui_settings_load(void)
 {
+	char path[UI_PATH_MAX];
 	FILE *fp;
 	char line[128];
 
 	g_settings_loaded = 1;
-	fp = fopen(UI_SETTINGS_FILE, "r");
+	ui_settings_path(path, sizeof path);
+	fp = fopen(path, "r");
 	if (!fp)
 		return;
 	while (fgets(line, sizeof(line), fp)) {
@@ -62,8 +78,11 @@ static void ui_settings_load(void)
  */
 static void ui_settings_save(void)
 {
-	FILE *fp = fopen(UI_SETTINGS_FILE, "w");
+	char path[UI_PATH_MAX];
+	FILE *fp;
 
+	ui_settings_path(path, sizeof path);
+	fp = fopen(path, "w");
 	if (!fp)
 		return;
 	fprintf(fp, "font_size\t%.1f\n", g_font_size);

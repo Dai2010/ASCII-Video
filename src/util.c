@@ -6,6 +6,7 @@
  */
 
 #include "util.h"
+#include "constants.h"
 
 #include <errno.h>
 #include <math.h>
@@ -13,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -199,6 +201,46 @@ const char *miku_temp_dir(void)
 		return t;
 	t = getenv("TMP");
 	return (t && *t) ? t : "/tmp";
+}
+
+/*
+ * miku_config_dir - 返回设置与视频库的配置目录：优先 MIKU_CONFIG_DIR，其次
+ * XDG_CONFIG_HOME/miku，再退回 ~/.config/miku，都不可用时用当前目录。目录
+ * 不存在时按 0700 创建，父目录缺失时补建一次。
+ *
+ * 返回：借用的静态缓冲，不得 free，下次调用会覆盖；调用方应立即拼出完整路径
+ * 或自行复制。
+ */
+const char *miku_config_dir(void)
+{
+	static char path[UI_PATH_MAX];
+	char parent[UI_PATH_MAX];
+	const char *env = getenv("MIKU_CONFIG_DIR");
+	char *slash;
+
+	if (env && *env) {
+		snprintf(path, sizeof path, "%s", env);
+	} else {
+		env = getenv("XDG_CONFIG_HOME");
+		if (env && *env) {
+			snprintf(path, sizeof path, "%s/miku", env);
+		} else {
+			env = getenv("HOME");
+			snprintf(path, sizeof path, "%s/.config/miku",
+				 (env && *env) ? env : ".");
+		}
+	}
+	if (mkdir(path, 0700) == 0 || errno != ENOENT)
+		return path;
+	/* ENOENT 表示只有一层父目录缺失（如全新的 ~/.config），补建后再试 */
+	snprintf(parent, sizeof parent, "%s", path);
+	slash = strrchr(parent, '/');
+	if (!slash)
+		return path;
+	*slash = '\0';
+	mkdir(parent, 0700);
+	mkdir(path, 0700);
+	return path;
 }
 
 /*

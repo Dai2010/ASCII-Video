@@ -146,6 +146,29 @@ static void ui_lib_ensure_mp4(char *path, size_t cap)
 }
 
 /*
+ * ui_lib_abs_path - 把路径规范化为绝对路径；解析失败或路径为空时原样复制。
+ * 记录一律存绝对路径，配置目录里的列表才能在任意工作目录下找回成品。
+ *
+ * @path: 借用的输入路径，允许与 dst 指向同一缓冲。
+ * @dst: 调用方持有的输出字符数组。
+ * @cap: 输出数组容量，单位字节，包含结尾 NUL 空间。
+ *
+ * 返回：无；只写入 dst。
+ * 线程约束：仅由界面/播放主线程串行调用；信号处理器只置标志。
+ */
+static void ui_lib_abs_path(const char *path, char *dst, size_t cap)
+{
+	char *full = path[0] ? realpath(path, NULL) : NULL;
+
+	if (full) {
+		snprintf(dst, cap, "%s", full);
+		free(full);
+		return;
+	}
+	snprintf(dst, cap, "%s", path);
+}
+
+/*
  * miku_ui_prepare_output - 在转换开始前根据选定规格生成或调整输出路径。
  * 自动命名时附加风格与分辨率帧率后缀；手动命名且同名异规格文件已存在时，
  * 同样附加规格后缀以避免覆盖旧规格成品。
@@ -276,9 +299,13 @@ static void ui_lib_parse_line(struct library_list *list, char *line)
  */
 static void ui_lib_load_file(struct library_list *list)
 {
-	FILE *f = fopen(UI_LIBRARY_FILE, "r");
+	char path[UI_PATH_MAX];
+	FILE *f;
 	char line[1400];
 
+	snprintf(path, sizeof path, "%s/%s", miku_config_dir(),
+		 UI_LIBRARY_FILE);
+	f = fopen(path, "r");
 	if (!f)
 		return;
 	while (fgets(line, sizeof(line), f))
@@ -296,9 +323,13 @@ static void ui_lib_load_file(struct library_list *list)
  */
 static void ui_lib_save_file(const struct library_list *list)
 {
-	FILE *f = fopen(UI_LIBRARY_FILE, "w");
+	char path[UI_PATH_MAX];
+	FILE *f;
 	int i;
 
+	snprintf(path, sizeof path, "%s/%s", miku_config_dir(),
+		 UI_LIBRARY_FILE);
+	f = fopen(path, "w");
 	if (!f)
 		return;
 	for (i = 0; i < list->count; ++i) {
@@ -366,9 +397,10 @@ static void ui_lib_scan_cwd(struct library_list *list)
 			continue;
 		memset(&item, 0, sizeof(item));
 		ui_lib_base_name(de->d_name, item.name, sizeof(item.name));
-		snprintf(item.output, sizeof(item.output), "%s", de->d_name);
+		ui_lib_abs_path(de->d_name, item.output, sizeof(item.output));
 		ui_lib_guess_source(item.name, item.source,
 				    sizeof(item.source));
+		ui_lib_abs_path(item.source, item.source, sizeof(item.source));
 		item.width = vi.width;
 		item.height = vi.height;
 		item.fps = (int)lround((double)vi.fps_num / vi.fps_den);
@@ -403,8 +435,8 @@ void miku_ui_library_record(const struct ui_config *st, int cols,
 		ui_lib_base_name(st->output, item.name, sizeof(item.name));
 	else
 		ui_lib_base_name(st->input, item.name, sizeof(item.name));
-	snprintf(item.output, sizeof(item.output), "%s", st->output);
-	snprintf(item.source, sizeof(item.source), "%s", st->input);
+	ui_lib_abs_path(st->output, item.output, sizeof(item.output));
+	ui_lib_abs_path(st->input, item.source, sizeof(item.source));
 	item.width = res->prof.width;
 	item.height = res->prof.height;
 	item.fps = res->prof.fps;
@@ -433,6 +465,8 @@ static void ui_lib_draw_row(struct strbuf *sb, const struct library_list *list,
 	const struct library_item *it = &list->items[idx];
 	int focused = idx == list->selected;
 	char spec[160];
+	int spec_w;
+	int name_w;
 	int name_max;
 	int pad;
 
@@ -440,22 +474,33 @@ static void ui_lib_draw_row(struct strbuf *sb, const struct library_list *list,
 		 it->width, it->height, it->fps,
 		 it->style == STYLE_BLOCK ? "色块" : "字符",
 		 (double)it->bytes / (1024.0 * 1024.0));
-	name_max = cols - (int)miku_ui_text_width(spec) - 6;
-	if (name_max < 10)
-		name_max = 10;
+	spec_w = (int)miku_ui_text_width(spec);
+	name_max = cols - spec_w - 3; /* 前缀两列 + 至少一列间隔 */
+	if (name_max < 8) {
+		/* 窄屏先收窄规格说明，保住分辨率这一个关键区分信息 */
+		snprintf(spec, sizeof(spec), "[%dx%d %s]", it->width,
+			 it->height, it->style == STYLE_BLOCK ? "块" : "字");
+		spec_w = (int)miku_ui_text_width(spec);
+		name_max = cols - spec_w - 3;
+	}
 	miku_ui_row(sb, row);
 	miku_sb_addf(sb, "%s%s", focused ? UI_GOOD UI_BOLD "▶ " : "  ",
 		     focused ? UI_MIKU : "");
+	if (name_max < 8) {
+		/* 连压缩后的规格都放不下：只画名字，不再挤出屏幕 */
+		miku_ui_add_text_tail(sb, it->name, cols > 4 ? cols - 4 : 1);
+		miku_sb_addf(sb, UI_RESET);
+		return;
+	}
+	name_w = (int)miku_ui_text_width(it->name);
+	if (name_w > name_max)
+		name_w = name_max;
 	miku_ui_add_text_tail(sb, it->name, name_max);
 	miku_sb_addf(sb, UI_RESET);
-	pad = cols - miku_ui_text_width(it->name) - miku_ui_text_width(spec) -
-	      4;
-	if (miku_ui_text_width(it->name) > name_max)
-		pad = cols - name_max - miku_ui_text_width(spec) - 4;
-	if (pad > 1)
-		miku_ui_pad(sb, pad);
-	else
-		miku_sb_addf(sb, " ");
+	pad = cols - name_w - spec_w - 3;
+	if (pad < 1)
+		pad = 1;
+	miku_ui_pad(sb, pad);
 	miku_sb_addf(sb, "%s%s" UI_RESET, focused ? UI_BOLD : UI_DIM, spec);
 }
 

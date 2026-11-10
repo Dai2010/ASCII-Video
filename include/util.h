@@ -94,6 +94,16 @@ char *miku_temp_video_path(void);
  * 返回：借用的环境变量或静态字符串，不得 free。
  */
 const char *miku_temp_dir(void);
+
+/*
+ * miku_config_dir - 返回设置与视频库的配置目录：优先 MIKU_CONFIG_DIR，其次
+ * XDG_CONFIG_HOME/miku，再退回 ~/.config/miku，都不可用时用当前目录。目录
+ * 不存在时按 0700 创建，父目录缺失时补建一次。
+ *
+ * 返回：借用的静态缓冲，不得 free，下次调用会覆盖；调用方应立即拼出完整路径
+ * 或自行复制。
+ */
+const char *miku_config_dir(void);
 /*
  * miku_clamp_int - 返回闭区间 [minimum,maximum] 内的值；调用方保证 minimum
  * <=maximum。

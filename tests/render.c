@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
+#include <unistd.h>
 
 static uint64_t hash_bytes(uint64_t hash, const void *data, size_t bytes)
 {
@@ -141,17 +142,34 @@ static void check_terminal_and_utf8(void)
 	cell[2] = 196;
 	assert(miku_cell_color(cell).b - miku_cell_color(cell).r >= 30);
 
-	assert(miku_settings_get_font_size() >= 4.0);
-	assert(miku_settings_get_font_size() <= 12.5);
-	miku_settings_set_font_size(3.0);
-	assert(miku_settings_get_font_size() == 4.0);
-	miku_settings_set_font_size(15.0);
-	assert(miku_settings_get_font_size() == 12.5);
-	miku_settings_set_font_size(7.2);
-	assert(miku_settings_get_font_size() == 7.0);
-	miku_settings_set_font_size(6.0);
-	assert(miku_settings_get_font_size() == 6.0);
-	remove(UI_SETTINGS_FILE);
+	{
+		char dir[UI_PATH_MAX];
+		char file[UI_PATH_MAX];
+
+		/*
+		 * 设置写入配置目录：测试改到临时目录，绝不碰用户的真实设置
+		 * 文件，结束后连同目录一起删除。
+		 */
+		snprintf(dir, sizeof dir, "%s/miku-test-XXXXXX",
+			 miku_temp_dir());
+		assert(mkdtemp(dir) != NULL);
+		setenv("MIKU_CONFIG_DIR", dir, 1);
+
+		assert(miku_settings_get_font_size() >= 4.0);
+		assert(miku_settings_get_font_size() <= 12.5);
+		miku_settings_set_font_size(3.0);
+		assert(miku_settings_get_font_size() == 4.0);
+		miku_settings_set_font_size(15.0);
+		assert(miku_settings_get_font_size() == 12.5);
+		miku_settings_set_font_size(7.2);
+		assert(miku_settings_get_font_size() == 7.0);
+		miku_settings_set_font_size(6.0);
+		assert(miku_settings_get_font_size() == 6.0);
+
+		snprintf(file, sizeof file, "%s/%s", dir, UI_SETTINGS_FILE);
+		remove(file);
+		rmdir(dir);
+	}
 
 	free(trunc);
 	free(sb.buf);

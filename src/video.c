@@ -55,9 +55,7 @@ static void ratio_dims(int ratio, const struct video_info *source, int base_h,
 			ar = term_ar;
 		else
 			ar = src_ar;
-	} else if (ratio == 3) {
-		ar = 1.0;
-	} else if (ratio > 0) {
+	} else if (ratio > 0 && ratio < RATIO_COUNT) {
 		ar = ratio_values[ratio];
 	} else {
 		ar = src_ar;

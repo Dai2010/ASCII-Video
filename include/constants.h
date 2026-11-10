@@ -86,9 +86,10 @@
 #define UI_MIKU "\x1b[38;2;126;255;96m" /* 葱绿 */
 #define UI_LYRIC_COUNT 12
 #define UI_MENU_COUNT 5
-#define UI_LIBRARY_FILE ".miku-library.tsv"
+/* 两个持久化文件名，均位于 miku_config_dir() 返回的配置目录内。 */
+#define UI_LIBRARY_FILE "library.tsv"
 #define UI_LIBRARY_MAX 128
-#define UI_SETTINGS_FILE ".miku-settings.tsv"
+#define UI_SETTINGS_FILE "settings.tsv"
 #define UI_FONT_SIZE_MIN 4.0
 #define UI_FONT_SIZE_MAX 12.5
 #define UI_FONT_SIZE_DEFAULT 6.0
